@@ -5,3 +5,11 @@ dist-ssr
 .DS_Store
 .vite
 node_modules/.tmp
+
+# Python / notebooks
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
