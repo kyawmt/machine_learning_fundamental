@@ -24,6 +24,16 @@ npm run build
 Builds to `dist/` — a static bundle you can open from any static host. There is
 no backend; all progress lives in `localStorage`.
 
+## Study with the Notebooks
+
+A companion 5-notebook Jupyter suite is available in the [`notebooks/`](notebooks/) directory.
+While the web app teaches concepts, formulas, and interview answers, the notebooks run the
+empirical experiments: decomposing bias/variance from bootstrap fits, measuring data leakage
+inflation, measuring random forest tree correlation, and building an end-to-end production pipeline.
+
+See [`notebooks/README.md`](notebooks/README.md) for quickstart instructions and the 4-hour notebook roadmap.
+
+
 ## What's in it
 
 **25 sections** in a fixed order, split across four one-hour blocks:
