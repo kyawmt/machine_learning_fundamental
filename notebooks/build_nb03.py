@@ -20,7 +20,7 @@ In this notebook, we implement core ML algorithms from scratch and benchmark sta
 3. Prove why Log Loss beats MSE for binary classification by visualizing the gradient saturation surface.
 4. Plot exact L1/L2 regularization coefficient paths and demonstrate collinear feature instability.
 5. Prove the 2D search space efficiency of Random Search over Grid Search.
-6. Execute the 8-algorithm bake-off and **empirically measure random forest tree correlation $\\rho$** to prove ensemble variance reduction."""
+6. Execute an 8-algorithm bake-off with group-safe folds and **empirically measure random forest tree correlation $\\rho$**."""
         ),
         nbf.v4.new_code_cell(
             """import sys
@@ -76,10 +76,10 @@ for step in range(300):
     grad = (1.0 / len(X_syn)) * X_syn.T @ (X_syn @ w - y_syn)
     w -= lr * grad
 
-# Analytical OLS solution: (X^T X)^(-1) X^T y
-w_ols = np.linalg.inv(X_syn.T @ X_syn) @ X_syn.T @ y_syn
+# Stable least-squares solution (avoid explicitly inverting X^T X)
+w_ols = np.linalg.lstsq(X_syn, y_syn, rcond=None)[0]
 
-assert np.allclose(w, w_ols, atol=1e-2), "Gradient descent must match OLS solution"
+assert np.allclose(w, w_ols, atol=1e-3), "Gradient descent must match OLS solution"
 
 print(f"GD Solution : Intercept = {w[0]:.4f}, Slope = {w[1]:.4f}")
 print(f"OLS Solution: Intercept = {w_ols[0]:.4f}, Slope = {w_ols[1]:.4f}")
@@ -118,8 +118,16 @@ plt.show()
 print("Regime Results:")
 print("η = 0.05 : Monotonic but sluggish convergence.")
 print("η = 0.30 : Rapid, healthy geometric descent.")
-print("η = 1.60 : Bounces across the minimum but converges noisily.")
-print(f"η = 2.20 : Overshoots exponentially -> exploded to {run_gd_regime(2.2)[-1]:.2e} (NaN / Divergence).")
+print("η = 1.60 : Deterministically oscillates across the minimum while converging.")
+with np.errstate(over="ignore", invalid="ignore"):
+    theta, nan_step = -3.2, None
+    for step in range(1, 10000):
+        theta = theta - 2.2 * (theta - 2.0)
+        if np.isnan(theta):
+            nan_step = step
+            break
+assert nan_step is not None
+print(f"η = 2.20 : |1-η| > 1, so the error grows until an actual NaN appears at step {nan_step}.")
 """
         ),
         nbf.v4.new_markdown_cell(
@@ -170,7 +178,7 @@ check_3_1(momentum_gd)
 **The question:** Why can't we train a binary classifier using Mean Squared Error (MSE) loss?
 
 **What you'll see:** 
-1. Complete Logistic Regression implementation in pure NumPy matching `LogisticRegression(penalty=None)` to 2 decimal places.
+1. Complete Logistic Regression implementation in pure NumPy matching an effectively unregularized scikit-learn fit to 2 decimal places.
 2. A plot of MSE vs Log Loss surfaces demonstrating why MSE suffers from flat, zero-gradient saturation zones for wrong predictions."""
         ),
         nbf.v4.new_code_cell(
@@ -198,7 +206,7 @@ y_clf = (rng_clf.uniform(size=200) < prob_true).astype(int)
 
 X_design = np.c_[np.ones(200), X_feat]
 w_custom = fit_logistic_scratch(X_design, y_clf, lr=0.5, n_iter=1000)
-sk_model = LogisticRegression(C=1e5, solver="lbfgs").fit(X_feat, y_clf)
+sk_model = LogisticRegression(C=np.inf, solver="lbfgs").fit(X_feat, y_clf)
 w_sklearn = np.array([sk_model.intercept_[0], sk_model.coef_[0][0]])
 
 assert np.allclose(w_custom, w_sklearn, atol=0.05), "Custom logistic weights match scikit-learn"
@@ -276,7 +284,7 @@ fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4), sharey=True)
 
 ax1.plot(alphas, ridge_coefs)
 ax1.set_xscale("log")
-ax1.set_title("L2 · Ridge: Proportional Shrinkage (Never 0)")
+ax1.set_title("L2 · Ridge: Shrinkage (Does Not Promote Sparsity)")
 ax1.set_xlabel("Regularization α")
 ax1.set_ylabel("Coefficients")
 
@@ -331,13 +339,17 @@ print(f"Ridge Coef x1 Std Dev: {np.std(ridge_draws[:, 0]):.3f} | Coef x2 Std Dev
 clf_audit = RandomForestClassifier(n_estimators=100, max_depth=6, random_state=SEED)
 clf_audit.fit(X_diab[:300], (y_diab[:300] > np.median(y_diab[:300])).astype(int))
 
-hyperparams = list(clf_audit.get_params().keys())[:6]
-learned_params = [attr for attr in dir(clf_audit) if attr.endswith("_") and not attr.startswith("__")][:6]
-
-audit_table = pd.DataFrame({
-    "Hyperparameters (You Choose)": hyperparams,
-    "Learned Parameters (Data Determines)": learned_params
-})
+chosen = {k: clf_audit.get_params()[k] for k in ["n_estimators", "max_depth", "criterion", "max_features", "bootstrap", "random_state"]}
+learned = {
+    "classes_": clf_audit.classes_.tolist(),
+    "n_features_in_": clf_audit.n_features_in_,
+    "n_outputs_": clf_audit.n_outputs_,
+    "estimators_": f"{len(clf_audit.estimators_)} fitted trees",
+}
+audit_table = pd.concat([
+    pd.DataFrame({"Kind": "Configured hyperparameter", "Name": chosen.keys(), "Value": [str(v) for v in chosen.values()]}),
+    pd.DataFrame({"Kind": "Learned fitted attribute", "Name": learned.keys(), "Value": [str(v) for v in learned.values()]}),
+], ignore_index=True)
 audit_table
 """
         ),
@@ -349,7 +361,7 @@ audit_table
 ## 3.5 Grid Search vs Random Search 🔴 (8 min)
 > 📖 **Website:** [Hyperparameters vs Parameters](http://localhost:5173/#params-hyperparams)
 
-**The question:** When only one hyperparameter genuinely drives performance and another is mostly noise, why does 25 iterations of Random Search drastically outperform a 5×5 Grid Search?
+**The question:** When only one hyperparameter genuinely drives performance and another is mostly noise, why does random search cover the important axis more efficiently than a 5×5 grid?
 
 **What you'll see:** 
 A 2D parameter space plot showing Grid Search evaluates only 5 distinct values of the critical parameter, while Random Search explores 25 distinct values for the exact same compute budget."""
@@ -381,13 +393,22 @@ rand.fit(X_tr_clean, y_tr)
 grid_unique_nodes = len(set(p["max_leaf_nodes"] for p in grid.cv_results_["params"]))
 rand_unique_nodes = len(set(p["max_leaf_nodes"] for p in rand.cv_results_["params"]))
 
-print(f"5x5 Grid Search (25 fits)   : Explored {grid_unique_nodes} distinct values of max_leaf_nodes | Best Score: {grid.best_score_:.4f}")
-print(f"Random Search (25 fits)     : Explored {rand_unique_nodes} distinct values of max_leaf_nodes | Best Score: {rand.best_score_:.4f}")
-print(f"\\nConclusion: Random Search maximizes coverage of low-effective-dimension hyperparameter manifolds without wasting budget on redundant grid coordinates.")
+print(f"5x5 Grid (25 configs, 75 CV fits): {grid_unique_nodes} distinct max_leaf_nodes values | Best: {grid.best_score_:.4f}")
+print(f"Random (25 configs, 75 CV fits)  : {rand_unique_nodes} distinct max_leaf_nodes values | Best: {rand.best_score_:.4f}")
+print("\\nRandom search improves coverage, not a guarantee that one finite draw beats a grid on every dataset.")
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 3.8), sharex=True, sharey=True)
+for ax, search, title in [(axes[0], grid, "Grid"), (axes[1], rand, "Random")]:
+    params = search.cv_results_["params"]
+    points = ax.scatter([p["max_leaf_nodes"] for p in params], [p["min_samples_leaf"] for p in params],
+                        c=search.cv_results_["mean_test_score"], cmap="viridis", s=55)
+    ax.set(title=title, xlabel="max_leaf_nodes", ylabel="min_samples_leaf")
+fig.colorbar(points, ax=axes, label="Mean CV ROC-AUC")
+plt.show()
 """
         ),
         nbf.v4.new_markdown_cell(
-            """> 🎤 **In an interview:** "Bergstra and Bengio proved that most ML problems have low effective hyperparameter dimensionality—only 2-3 parameters really matter. Grid search wastes budget testing redundant values on inert axes; Random Search samples unique points across all dimensions simultaneously." """
+            """> 🎤 **In an interview:** "When only a few hyperparameters matter, a grid repeats the same important-axis values across inert dimensions. Random search usually covers each axis more broadly at the same configuration budget, though it does not guarantee a better finite-sample winner." """
         ),
         nbf.v4.new_markdown_cell(
             """---
@@ -397,29 +418,33 @@ print(f"\\nConclusion: Random Search maximizes coverage of low-effective-dimensi
 **The question:** How do 8 core algorithm families perform under identical cross-validation conditions, and how does `max_features` reduce variance in Random Forests?
 
 **What you'll see:** 
-1. Full 8-algorithm bake-off table with scoring, fit speed, inference latency, scaling requirement, and parameter counts.
+1. Full 8-algorithm bake-off table with group-safe scoring, fit speed, inference latency, scaling guidance, and serialized size.
 2. **Empirical Tree Correlation Measurement**: Measuring tree correlation $\\rho$ at `max_features=1`, `sqrt`, and `all` to verify the variance formula $\\rho\\sigma^2 + \\frac{1-\\rho}{B}\\sigma^2$."""
         ),
         nbf.v4.new_code_cell(
-            """from sklearn.model_selection import cross_validate, StratifiedKFold
+            """from sklearn.model_selection import cross_validate, GroupKFold
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 from sklearn.naive_bayes import GaussianNB
+from sklearn.ensemble import GradientBoostingClassifier
 import time
+import pickle
 
 bake_models = {
     "Logistic Regression": Pipeline([("sc", StandardScaler()), ("m", LogisticRegression(random_state=SEED))]),
     "Decision Tree": DecisionTreeClassifier(max_depth=5, random_state=SEED),
     "Random Forest": RandomForestClassifier(n_estimators=50, max_depth=6, random_state=SEED),
     "HistGradientBoosting": HistGradientBoostingClassifier(max_iter=50, random_state=SEED),
+    "Gradient Boosting": GradientBoostingClassifier(n_estimators=50, random_state=SEED),
     "KNN (k=7)": Pipeline([("sc", StandardScaler()), ("m", KNeighborsClassifier(n_neighbors=7))]),
-    "SVM (RBF)": Pipeline([("sc", StandardScaler()), ("m", SVC(probability=True, random_state=SEED))]),
+    "SVM (RBF)": Pipeline([("sc", StandardScaler()), ("m", SVC(random_state=SEED))]),
     "Gaussian Naive Bayes": GaussianNB(),
 }
 
-cv = StratifiedKFold(n_splits=4, shuffle=True, random_state=SEED)
+cv = list(GroupKFold(n_splits=4).split(X_tr_clean, y_tr, groups=train_df["user_id"]))
 bake_results = []
+scale_sensitive = {"Logistic Regression", "KNN (k=7)", "SVM (RBF)"}
 
 for name, model in bake_models.items():
     t0 = time.time()
@@ -439,61 +464,79 @@ for name, model in bake_models.items():
         "CV AUC Std": np.round(scores["test_score"].std(), 3),
         "Fit Time (s)": np.round(fit_time, 2),
         "Predict Latency (ms/1k)": np.round(pred_latency_ms, 2),
-        "Needs Scaling?": "YES" if "Pipeline" in str(model) else "NO",
-        "Handles NaN?": "YES" if "HistGradient" in name else "NO"
+        "Scale-sensitive?": "YES" if name in scale_sensitive else "NO",
+        "Handles NaN?": "YES" if "HistGradient" in name else "NO",
+        "Serialized KB": np.round(len(pickle.dumps(model)) / 1024, 1),
     })
 
-pd.DataFrame(bake_results).sort_values("CV AUC Mean", ascending=False).set_index("Model")
+bake_df = pd.DataFrame(bake_results).sort_values("CV AUC Mean", ascending=False).set_index("Model")
+display(bake_df)
+
+# Two high-yield algorithm checks
+stump = DecisionTreeClassifier(max_depth=1, random_state=SEED).fit(X_tr_clean, y_tr)
+p_root = y_tr.mean()
+gini_by_hand = 1 - p_root**2 - (1 - p_root)**2
+assert np.isclose(gini_by_hand, stump.tree_.impurity[0])
+print(f"\\nDecision-tree root Gini: hand={gini_by_hand:.6f}, sklearn={stump.tree_.impurity[0]:.6f} ✅")
+
+rng_dim = np.random.RandomState(SEED)
+ratios = []
+for dim in [2, 10, 50, 200]:
+    cloud = rng_dim.normal(size=(600, dim))
+    query = rng_dim.normal(size=(1, dim))
+    distances = np.linalg.norm(cloud - query, axis=1)
+    ratios.append((dim, distances.min() / distances.max()))
+print("Nearest/farthest distance ratio by dimension (approaching 1 weakens KNN contrast):")
+print(pd.DataFrame(ratios, columns=["Dimensions", "Nearest / farthest"]).round(3).to_string(index=False))
 """
         ),
         nbf.v4.new_markdown_cell(
             """Now let's execute the premier experiment: **measuring tree prediction correlation $\\rho$** inside a Random Forest as `max_features` changes!"""
         ),
         nbf.v4.new_code_cell(
-            """# Measure Tree Correlation rho in Random Forest
-feature_settings = [1, "sqrt", None]
-correlations = []
-ensemble_variances = []
+            """from sklearn.metrics import roc_auc_score
 
-X_test_arr = X_te_clean.values
+# Measure prediction-profile correlation inside a wider Random Forest
+rng_rf = np.random.RandomState(SEED)
+X_rf_train = X_tr_clean.reset_index(drop=True).copy()
+X_rf_test = X_te_clean.reset_index(drop=True).copy()
+for j in range(5):  # make max_features=1, sqrt(8)=2, and all genuinely distinct
+    X_rf_train[f"noise_{j}"] = rng_rf.normal(size=len(X_rf_train))
+    X_rf_test[f"noise_{j}"] = rng_rf.normal(size=len(X_rf_test))
 
-for mf in feature_settings:
-    rf = RandomForestClassifier(n_estimators=40, max_features=mf, random_state=SEED)
-    rf.fit(X_tr_clean, y_tr)
-    
-    # Extract probability predictions from each individual estimator tree
-    tree_preds = np.array([tree.predict_proba(X_test_arr)[:, 1] for tree in rf.estimators_])  # (40, N)
-    
-    # Compute average pairwise Pearson correlation between trees
-    corr_matrix = np.corrcoef(tree_preds)
-    np.fill_diagonal(corr_matrix, np.nan)
-    avg_rho = np.nanmean(corr_matrix)
-    correlations.append(avg_rho)
-    
-    # Variance of individual tree predictions vs ensemble average
-    ind_var = np.mean(np.var(tree_preds, axis=0))
-    ens_pred = np.mean(tree_preds, axis=0)
-    ens_var = np.var(ens_pred)
-    ensemble_variances.append(ens_var)
+rf_rows = []
+for mf, label in [(1, "1"), ("sqrt", "sqrt"), (None, "all")]:
+    rf = RandomForestClassifier(n_estimators=60, max_features=mf, random_state=SEED).fit(X_rf_train, y_tr)
+    tree_preds = np.array([tree.predict_proba(X_rf_test.values)[:, 1] for tree in rf.estimators_])
+    corr = np.corrcoef(tree_preds)
+    cov = np.cov(tree_preds, bias=True)
+    off_diag = ~np.eye(len(tree_preds), dtype=bool)
+    rho = corr[off_diag].mean()
 
-rf_table = pd.DataFrame({
-    "max_features": ["1 (Extreme Randomization)", "sqrt (Standard RF)", "None (Full Bagging)"],
-    "Tree Correlation (ρ)": np.round(correlations, 3),
-    "Ensemble Prediction Variance": np.round(ensemble_variances, 4)
-}).set_index("max_features")
+    # Exact variance-of-an-average identity over the fixed test population
+    b = len(tree_preds)
+    profile_var = np.var(tree_preds.mean(axis=0))
+    decomposed_var = (np.trace(cov) + cov[off_diag].sum()) / b**2
+    assert np.isclose(profile_var, decomposed_var)
+    forest_auc = roc_auc_score(y_te, rf.predict_proba(X_rf_test)[:, 1])
+    rf_rows.append((label, rho, profile_var, forest_auc))
 
-print("Random Forest Tree Correlation vs Variance Decomposition:")
-print(rf_table)
-print(f"\\nTheoretical formula: Var(RF) = ρ * σ² + (1 - ρ)/B * σ²")
-print(f"At max_features='sqrt', sub-sampling features drops tree correlation from {correlations[-1]:.3f} down to {correlations[1]:.3f}, reducing total ensemble variance.")
+rf_table = pd.DataFrame(rf_rows, columns=["max_features", "Mean tree correlation", "Variance of averaged prediction profile", "Forest test AUC"]).set_index("max_features")
+print(rf_table.round(4).to_string())
+print("\\nFor equal tree variance σ² and pairwise correlation ρ: Var(mean) = ρσ² + (1-ρ)σ²/B.")
+print("The measured correlations are over a fixed test population; causal model variance is estimated by repeated refits in Notebook 04.")
 """
         ),
         nbf.v4.new_markdown_cell(
-            """> 🎤 **In an interview:** "Random Forest outperforms plain Bagging because it decorrelates trees via random feature subsets at every split. If trees are correlated with coefficient $\\rho$, ensemble variance is bounded below by $\\rho\\sigma^2$ regardless of tree count $B$. Dropping $\\rho$ lowers the asymptotic variance floor." """
+            """> 🎤 **In an interview:** "Random feature subsets trade individual-tree strength for lower correlation. Under the equal-variance approximation, the ensemble variance floor is $\\rho\\sigma^2$; I validate the trade-off because reducing correlation can also weaken each tree." """
         ),
     ]
 
     nb["cells"] = cells
+    nb["metadata"] = {
+        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+        "language_info": {"name": "python", "pygments_lexer": "ipython3"},
+    }
     return nb
 
 

@@ -26,7 +26,7 @@ def use_style():
         "axes.titleweight": "bold",
         "axes.titlepad": 10,
         "axes.labelsize": 10,
-        "axes.labelweight": "medium",
+        "axes.labelweight": "normal",
         "xtick.labelsize": 9,
         "ytick.labelsize": 9,
         "legend.fontsize": 9,

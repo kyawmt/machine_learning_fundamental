@@ -1,19 +1,10 @@
-"""
-Direct, robust in-process notebook builder and executor.
-Executes all 5 notebooks, capturing text outputs, tables, and matplotlib figures
-directly into standard nbformat v4 cell outputs.
-"""
+"""Build and execute every notebook in a fresh Jupyter kernel."""
 
-import base64
-from contextlib import redirect_stderr, redirect_stdout
-import io
 import os
 import sys
 import time
-import matplotlib
-import matplotlib.pyplot as plt
 import nbformat as nbf
-from IPython.core.interactiveshell import InteractiveShell
+from nbclient import NotebookClient
 
 import build_nb00
 import build_nb01
@@ -22,106 +13,28 @@ import build_nb03
 import build_nb04
 
 
-def execute_notebook_in_process(nb: nbf.NotebookNode, working_dir: str = "notebooks") -> nbf.NotebookNode:
-    """Execute all code cells of a notebook sequentially in an in-process IPython session."""
-    orig_cwd = os.getcwd()
-    os.chdir(working_dir)
-    sys.path.insert(0, ".")
-
-    # Initialize fresh interactive shell
-    InteractiveShell.clear_instance()
-    shell = InteractiveShell.instance()
-    shell.colors = "NoColor"
-
-    # Set non-interactive matplotlib backend
-    matplotlib.use("Agg")
-
-    exec_count = 1
-
-    for cell in nb.cells:
-        if cell.cell_type != "code":
-            continue
-
-        source = cell.source
-        cell.outputs = []
-        cell.execution_count = exec_count
-
-        stdout_buf = io.StringIO()
-        stderr_buf = io.StringIO()
-
-        # Clear any existing matplotlib figures
-        plt.close("all")
-
-        with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
-            res = shell.run_cell(source, store_history=True)
-
-        stdout_val = stdout_buf.getvalue()
-        stderr_val = stderr_buf.getvalue()
-
-        # 1. Add stdout stream
-        if stdout_val:
-            cell.outputs.append(
-                nbf.v4.new_output(
-                    output_type="stream",
-                    name="stdout",
-                    text=stdout_val,
-                )
-            )
-
-        # 2. Add stderr stream (if any)
-        if stderr_val:
-            cell.outputs.append(
-                nbf.v4.new_output(
-                    output_type="stream",
-                    name="stderr",
-                    text=stderr_val,
-                )
-            )
-
-        # 3. Check for matplotlib plot figures created in cell
-        fig_nums = plt.get_fignums()
-        for fnum in fig_nums:
-            fig = plt.figure(fnum)
-            img_buf = io.BytesIO()
-            fig.savefig(img_buf, format="png", bbox_inches="tight", dpi=110)
-            img_buf.seek(0)
-            img_b64 = base64.b64encode(img_buf.read()).decode("utf-8")
-            plt.close(fig)
-
-            cell.outputs.append(
-                nbf.v4.new_output(
-                    output_type="display_data",
-                    data={"image/png": img_b64, "text/plain": "<Figure size ...>"},
-                )
-            )
-
-        # 4. Check for return value / expression display
-        if res.result is not None:
-            plain_repr = repr(res.result)
-            data_dict = {"text/plain": plain_repr}
-            if hasattr(res.result, "_repr_html_"):
-                data_dict["text/html"] = res.result._repr_html_()
-            cell.outputs.append(
-                nbf.v4.new_output(
-                    output_type="execute_result",
-                    execution_count=exec_count,
-                    data=data_dict,
-                )
-            )
-
-        # 5. Check for execution error
-        if res.error_in_exec:
-            ename = type(res.error_in_exec).__name__
-            evalue = str(res.error_in_exec)
-            print(f"❌ Cell Error in notebook execution: {ename}: {evalue}")
-            print(f"Cell source:\n{source}")
-            os.chdir(orig_cwd)
-            raise res.error_in_exec
-
-        exec_count += 1
-
-    os.chdir(orig_cwd)
-    return nb
+def execute_notebook(nb: nbf.NotebookNode, working_dir: str = "notebooks") -> nbf.NotebookNode:
+    """Execute a notebook exactly as Jupyter does, failing on the first bad cell."""
+    nb.metadata["kernelspec"] = {
+        "display_name": "Python 3",
+        "language": "python",
+        "name": "python3",
+    }
+    nb.metadata["language_info"] = {"name": "python", "pygments_lexer": "ipython3"}
+    client = NotebookClient(
+        nb,
+        timeout=120,
+        kernel_name="python3",
+        resources={"metadata": {"path": working_dir}},
+        allow_errors=False,
+        record_timing=False,
+    )
+    kernel_env = os.environ.copy()
+    kernel_env["PATH"] = os.pathsep.join([os.path.dirname(sys.executable), kernel_env.get("PATH", "")])
+    kernel_env.setdefault("MPLCONFIGDIR", "/tmp/mlprep-matplotlib")
+    kernel_env.setdefault("IPYTHONDIR", "/tmp/mlprep-ipython")
+    kernel_env.setdefault("LOKY_MAX_CPU_COUNT", "4")
+    return client.execute(env=kernel_env)
 
 
 def main():
@@ -140,7 +53,7 @@ def main():
         print(f"========================================================")
         t0 = time.time()
         nb = builder()
-        executed_nb = execute_notebook_in_process(nb, working_dir="notebooks")
+        executed_nb = execute_notebook(nb, working_dir="notebooks")
 
         with open(rel_path, "w", encoding="utf-8") as f:
             nbf.write(executed_nb, f)

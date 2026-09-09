@@ -46,7 +46,7 @@ def make_churn_panel(
       -> Feature scaling demo.
     - income: MNAR (Missing Not At Random) missingness. Missing probability is ~55% for high earners
       (> $115k) and ~6% for lower earners -> Missingness indicator demo.
-    - plan_region: ~200 categorical levels with varying baseline risk
+    - plan_region: ~200 categorical levels with planted varying baseline risk
       -> High cardinality, one-hot vs out-of-fold target encoding demo.
     - device: 4 unordered levels ('iOS', 'Android', 'Web', 'Desktop')
       -> One-hot vs ordinal false-ordering trap demo.
@@ -58,24 +58,45 @@ def make_churn_panel(
       cost-sensitive thresholds, class weights, SMOTE).
     - Interaction: Monthly spend risk is amplified for low-tenure users, giving non-linear
       tree models an honest performance edge over linear baselines.
-    - Honest AUC: A clean model without leaky features achieves ~0.79-0.84 ROC-AUC.
+    - Honest AUC: A clean numeric baseline typically achieves ~0.80-0.87 ROC-AUC;
+      richer leakage-free pipelines may improve on it.
     """
+    if n_users < 1:
+        raise ValueError("n_users must be at least 1")
+    if snapshots_per_user < 1:
+        raise ValueError("snapshots_per_user must be at least 1")
+
     rng = np.random.RandomState(seed)
 
     user_ids = [f"USR_{i:04d}" for i in range(1, n_users + 1)]
-    snapshot_dates = ["2025-01-01", "2025-02-01", "2025-03-01"][:snapshots_per_user]
+    snapshot_dates = pd.date_range("2025-01-01", periods=snapshots_per_user, freq="MS")
 
     base_tenure = rng.gamma(shape=2.2, scale=170, size=n_users) + 15
     base_spend = rng.lognormal(mean=4.1, sigma=0.5, size=n_users) + 15
     base_income = rng.lognormal(mean=11.1, sigma=0.45, size=n_users)
     base_region_id = rng.randint(1, 201, size=n_users)
     base_region = [f"REG_{r:03d}" for r in base_region_id]
+    region_effects = rng.normal(0.0, 0.65, size=200)
+    base_region_effect = region_effects[base_region_id - 1]
     device_choices = ["iOS", "Android", "Web", "Desktop"]
     base_device = rng.choice(device_choices, p=[0.42, 0.33, 0.15, 0.10], size=n_users)
+    device_effect_map = {"iOS": -0.10, "Android": 0.08, "Web": 0.18, "Desktop": -0.05}
+    base_device_effect = np.array([device_effect_map[d] for d in base_device])
+    income_z = (np.log(base_income) - 11.1) / 0.45
+    user_latent_effect = rng.normal(0.0, 0.35, size=n_users)
 
     # Underlying user churn propensity with interaction
     interaction = (base_spend / 55.0) * np.exp(-base_tenure / 130.0) * 2.4
-    user_risk = -3.8 + 0.007 * (base_spend - 70) - 0.0028 * (base_tenure - 350) + interaction
+    user_risk = (
+        -4.05
+        + 0.007 * (base_spend - 70)
+        - 0.0028 * (base_tenure - 350)
+        + interaction
+        + 0.35 * income_z
+        + base_region_effect
+        + base_device_effect
+        + user_latent_effect
+    )
 
     rows = []
     cancellation_reasons = ["Price", "Competitor", "Service", "Relocation"]
@@ -163,9 +184,9 @@ def make_scored_population(
     Generate scored population reproducing the website's Threshold Lab.
 
     Matches:
-    - 970 negatives: squash(gaussian(mean=-3.0, sd=1.6))
-    - 30 positives: squash(gaussian(mean=-0.1, sd=1.35))
-    - Yields ROC-AUC ≈ 0.94, PR-AUC ≈ 0.41.
+    - 970 negatives: squash(gaussian(mean=-4.4, sd=1.6))
+    - 30 positives: squash(gaussian(mean=-1.5, sd=1.0))
+    - Yields ROC-AUC ≈ 0.94, PR-AUC ≈ 0.42 at the default seed.
     """
     rnd = _mulberry32(seed)
 
@@ -175,8 +196,8 @@ def make_scored_population(
     n_pos = int(round(n * positive_rate))
     n_neg = n - n_pos
 
-    neg_scores = [squash(_gaussian(rnd, -3.0, 1.6)) for _ in range(n_neg)]
-    pos_scores = [squash(_gaussian(rnd, -0.1, 1.35)) for _ in range(n_pos)]
+    neg_scores = [squash(_gaussian(rnd, -4.4, 1.6)) for _ in range(n_neg)]
+    pos_scores = [squash(_gaussian(rnd, -1.5, 1.0)) for _ in range(n_pos)]
 
     scores = neg_scores + pos_scores
     labels = [0] * n_neg + [1] * n_pos

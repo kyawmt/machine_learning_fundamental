@@ -20,7 +20,7 @@ In this notebook, we move from conceptual definitions to live data transformatio
 3. Generate the canonical **ROC-AUC vs PR-AUC sweep under severe class imbalance**.
 4. Evaluate calibration curves (reliability diagrams) and Brier scores.
 5. Prove the median/mean optimality of MAE/MSE and produce a negative $R^2$.
-6. Prove tree scale invariance bit-for-bit with an exact NumPy assertion.
+6. Check seeded tree prediction invariance under standardization with an exact NumPy assertion.
 7. Recover MNAR missing signal with missingness indicators and compare categorical encodings."""
         ),
         nbf.v4.new_code_cell(
@@ -112,18 +112,22 @@ check_2_1(calc_precision, calc_recall, calc_specificity, calc_f1)
 
 **The question:** The default classification threshold is $\\tau = 0.5$. If a False Positive costs $\\$8$ and a False Negative costs $\\$400$, how much money is wasted by sticking with 0.5?
 
-**What you'll see:** We reproduce the website's **Threshold Lab** with `make_scored_population()` (1,000 cases, 3% positive, ROC-AUC ≈ 0.94, PR-AUC ≈ 0.41) and find the cost-optimal decision threshold."""
+**What you'll see:** We reproduce the website's **Threshold Lab** with `make_scored_population()` (1,000 cases, 3% positive, ROC-AUC ≈ 0.94, PR-AUC ≈ 0.42) and find the cost-optimal decision threshold."""
         ),
         nbf.v4.new_code_cell(
-            """df_pop = make_scored_population(n=1000, positive_rate=0.03, seed=20260822)
+            """from sklearn.metrics import roc_auc_score, average_precision_score
+
+df_pop = make_scored_population(n=1000, positive_rate=0.03, seed=20260822)
 y_true_pop = df_pop["y_true"].values
 scores_pop = df_pop["score"].values
+print(f"Threshold Lab ranking check: ROC-AUC={roc_auc_score(y_true_pop, scores_pop):.3f}, PR-AUC={average_precision_score(y_true_pop, scores_pop):.3f}")
 
 COST_FP = 8.0     # Cost of manual review or customer friction ($8)
 COST_FN = 400.0   # Cost of missed fraud or lost churner ($400)
 
 thresholds = np.linspace(0.01, 0.99, 100)
 expected_costs = []
+precisions, recalls, f1s = [], [], []
 
 for t in thresholds:
     preds = (scores_pop >= t).astype(int)
@@ -131,10 +135,17 @@ for t in thresholds:
     tn_t, fp_t, fn_t, tp_t = cm_t.ravel()
     total_cost = fp_t * COST_FP + fn_t * COST_FN
     expected_costs.append(total_cost)
+    precision_t = tp_t / (tp_t + fp_t) if tp_t + fp_t else 0.0
+    recall_t = tp_t / (tp_t + fn_t) if tp_t + fn_t else 0.0
+    precisions.append(precision_t)
+    recalls.append(recall_t)
+    f1s.append(2 * precision_t * recall_t / (precision_t + recall_t) if precision_t + recall_t else 0.0)
 
 best_idx = np.argmin(expected_costs)
 best_threshold = thresholds[best_idx]
 min_cost = expected_costs[best_idx]
+preds_best = (scores_pop >= best_threshold).astype(int)
+tn_b, fp_b, fn_b, tp_b = confusion_matrix(y_true_pop, preds_best).ravel()
 
 # Cost at default 0.5
 preds_default = (scores_pop >= 0.5).astype(int)
@@ -142,19 +153,28 @@ tn_d, fp_d, fn_d, tp_d = confusion_matrix(y_true_pop, preds_default).ravel()
 cost_default = fp_d * COST_FP + fn_d * COST_FN
 savings = cost_default - min_cost
 
-plt.figure(figsize=(7, 4))
-plt.plot(thresholds, expected_costs, color=COLOR_PRIMARY, lw=2.2, label="Total Expected Cost ($)")
-plt.axvline(best_threshold, color=COLOR_TRAIN, linestyle="--", label=f"Optimal Threshold (τ = {best_threshold:.2f})")
-plt.axvline(0.5, color=COLOR_VAL, linestyle=":", label="Default Threshold (τ = 0.50)")
-plt.title(f"Optimal threshold τ = {best_threshold:.2f} saves ${savings:,.0f} vs default 0.5")
-plt.xlabel("Decision Threshold")
-plt.ylabel("Total Financial Loss ($)")
-plt.legend()
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
+ax1.plot(thresholds, precisions, label="Precision", color=COLOR_PRIMARY)
+ax1.plot(thresholds, recalls, label="Recall", color=COLOR_VAL)
+ax1.plot(thresholds, f1s, label="F1", color=COLOR_TRAIN)
+ax1.set(title="Operating metrics move with the threshold", xlabel="Decision threshold", ylabel="Metric")
+ax1.legend()
+ax2.plot(thresholds, expected_costs, color=COLOR_PRIMARY, lw=2.2, label="Total cost ($)")
+ax2.axvline(best_threshold, color=COLOR_TRAIN, linestyle="--", label=f"Cost optimum (τ={best_threshold:.2f})")
+ax2.axvline(0.5, color=COLOR_VAL, linestyle=":", label="Default (τ=0.50)")
+ax2.set(title=f"Cost optimum saves ${savings:,.0f}", xlabel="Decision threshold", ylabel="Total financial loss ($)")
+ax2.legend()
+plt.tight_layout()
 plt.show()
 
 print(f"Default 0.50 Threshold Cost: ${cost_default:,.2f} (TP={tp_d}, FP={fp_d}, FN={fn_d}, TN={tn_d})")
-print(f"Optimal {best_threshold:.2f} Threshold Cost: ${min_cost:,.2f} (TP={tp_t}, FP={fp_t}, FN={fn_t}, TN={tn_t})")
+print(f"Optimal {best_threshold:.2f} Threshold Cost: ${min_cost:,.2f} (TP={tp_b}, FP={fp_b}, FN={fn_b}, TN={tn_b})")
 print(f"\\nFinancial Saving: ${savings:,.2f} ({savings/cost_default:.1%}) purely by tuning the threshold with ZERO retraining cost!")
+
+k = 100
+top_k = np.argsort(scores_pop)[-k:]
+print(f"Precision@{k}: {y_true_pop[top_k].mean():.1%} ({y_true_pop[top_k].sum()} positives in a fixed review queue of {k})")
+print("In production, select the threshold on validation data and report its cost once on untouched test data.")
 """
         ),
         nbf.v4.new_markdown_cell(
@@ -197,7 +217,7 @@ check_2_2(find_best_threshold)
 </details>"""
         ),
         nbf.v4.new_markdown_cell(
-            """> 🎤 **In an interview:** "A binary classifier outputs probabilities, not decisions. I decouple model training from threshold selection: train for calibrated ranking quality, then set the operating threshold by minimizing expected dollar cost according to the business loss matrix." """
+            """> 🎤 **In an interview:** "A score is not a decision. I choose the operating threshold on validation data from explicit error costs or queue capacity, then evaluate that frozen policy once on the test set." """
         ),
         nbf.v4.new_markdown_cell(
             """---
@@ -206,7 +226,7 @@ check_2_2(find_best_threshold)
 
 **The question:** Why do senior ML engineers insist on Precision–Recall AUC over ROC-AUC on imbalanced datasets?
 
-**What you'll see:** We hold the classification model completely fixed, vary positive class prevalence from 50% down to 0.5% by adding negative cases, and track both metrics. **ROC-AUC stays flat at $\\approx 0.94$, while PR-AUC collapses from $0.94$ to $0.18$.**"""
+**What you'll see:** We keep the class-conditional score distributions fixed, vary prevalence from 50% down to 0.5%, and track both metrics. ROC-AUC is prevalence-invariant in expectation, while PR-AUC changes because precision depends directly on the base rate."""
         ),
         nbf.v4.new_code_cell(
             """from sklearn.metrics import roc_auc_score, average_precision_score
@@ -242,11 +262,12 @@ plt.show()
 
 print(f"At 50% Positives : ROC-AUC = {roc_aucs[0]:.3f} | PR-AUC = {pr_aucs[0]:.3f}")
 print(f"At 0.5% Positives: ROC-AUC = {roc_aucs[-1]:.3f} | PR-AUC = {pr_aucs[-1]:.3f}  <-- Gap: {roc_aucs[-1] - pr_aucs[-1]:.3f}!")
-print(f"\\nReason: ROC-AUC's FPR denominator is the massive True Negative pool (FP / (FP + TN)). Adding millions of negatives shrinks FPR without penalizing the model for flooded false positives.")
+print("\\nReason: ROC-AUC asks how often a random positive outranks a random negative, so prevalence is absent from its definition.")
+print("Precision includes false positives relative to predicted positives, so its achievable baseline equals the positive prevalence.")
 """
         ),
         nbf.v4.new_markdown_cell(
-            """> 🎤 **In an interview:** "On imbalanced problems like fraud or rare disease detection, a high ROC-AUC can mask an alert queue that is 95% false alarms because the denominator of FPR is overwhelmed by true negatives. PR-AUC replaces TN with Precision, reflecting actual operational utility." """
+            """> 🎤 **In an interview:** "ROC-AUC measures ranking independent of prevalence. For a rare-positive alert queue I also report the precision-recall curve, its prevalence baseline, and precision at the actual review capacity." """
         ),
         nbf.v4.new_markdown_cell(
             """---
@@ -255,7 +276,7 @@ print(f"\\nReason: ROC-AUC's FPR denominator is the massive True Negative pool (
 
 **The question:** If Model A has a higher ROC-AUC than Model B, does it necessarily produce more trustworthy predicted probabilities?
 
-**What you'll see:** We fit Logistic Regression, Random Forest, and Gaussian Naive Bayes, plot reliability curves, and compute Brier scores. Naive Bayes produces strong ranking with terrible calibration."""
+**What you'll see:** We compare ranking and calibration, then show that class weighting can leave ROC-AUC similar while distorting probabilities. `CalibratedClassifierCV` repairs the probability scale using predictions from held-out folds."""
         ),
         nbf.v4.new_code_cell(
             """from sklearn.calibration import calibration_curve, CalibratedClassifierCV
@@ -270,6 +291,10 @@ y = df["churned"]
 
 models = {
     "Logistic Regression": LogisticRegression(random_state=SEED),
+    "Balanced Logistic (uncalibrated)": LogisticRegression(class_weight="balanced", random_state=SEED),
+    "Balanced Logistic + calibration": CalibratedClassifierCV(
+        LogisticRegression(class_weight="balanced", random_state=SEED), method="sigmoid", cv=5
+    ),
     "Random Forest": RandomForestClassifier(random_state=SEED, n_estimators=50),
     "Gaussian Naive Bayes": GaussianNB(),
 }
@@ -281,7 +306,7 @@ calib_summary = []
 for name, m in models.items():
     m.fit(X[:2000], y[:2000])
     probs = m.predict_proba(X[2000:])[:, 1]
-    prob_true, prob_pred = calibration_curve(y[2000:], probs, n_bins=8)
+    prob_true, prob_pred = calibration_curve(y[2000:], probs, n_bins=8, strategy="quantile")
     
     auc = roc_auc_score(y[2000:], probs)
     brier = brier_score_loss(y[2000:], probs)
@@ -295,7 +320,10 @@ plt.ylabel("Fraction of True Positives")
 plt.legend()
 plt.show()
 
-pd.DataFrame(calib_summary).set_index("Model")
+calib_df = pd.DataFrame(calib_summary).set_index("Model")
+calib_df["AUC rank"] = calib_df["ROC-AUC (Ranking)"].rank(ascending=False).astype(int)
+calib_df["Brier rank"] = calib_df["Brier Score (Calibration MSE)"].rank().astype(int)
+calib_df.sort_values("Brier Score (Calibration MSE)")
 """
         ),
         nbf.v4.new_markdown_cell(
@@ -332,10 +360,11 @@ print(f"Empirical Sample Median = {np.median(sample):.2f} | MAE Loss Minimizer =
 print(f"Empirical Sample Mean   = {np.mean(sample):.2f} | MSE Loss Minimizer = {opt_mse_c:.2f}")
 
 # 2. Negative R2 Demo
+rng_reg = np.random.RandomState(SEED)
 X_tr_toy = np.linspace(0, 1, 10).reshape(-1, 1)
-y_tr_toy = 3 * X_tr_toy.ravel() + np.random.normal(0, 0.1, 10)
+y_tr_toy = 3 * X_tr_toy.ravel() + rng_reg.normal(0, 0.1, 10)
 X_te_toy = np.linspace(1.1, 2.0, 10).reshape(-1, 1)
-y_te_toy = 3 * X_te_toy.ravel() + np.random.normal(0, 0.1, 10)
+y_te_toy = 3 * X_te_toy.ravel() + rng_reg.normal(0, 0.1, 10)
 
 poly_feat = PolynomialFeatures(degree=9)
 X_tr_poly_toy = poly_feat.fit_transform(X_tr_toy)
@@ -347,7 +376,16 @@ neg_r2 = r2_score(y_te_toy, bad_preds)
 
 
 print(f"\\nOverfitted Polynomial Test R² = {neg_r2:.2f}")
-print(f"Interpretation: R² is negative whenever the model's predictions have larger squared error than simply predicting the training mean (ȳ).")
+print("Interpretation: test R² is negative when predictions are worse than the constant test-set mean baseline used by the metric.")
+
+# 3. MAE vs RMSE sensitivity to a few extreme residuals
+clean_errors = rng_reg.normal(0, 1, 200)
+contaminated_errors = clean_errors.copy()
+contaminated_errors[:3] = [12, -15, 18]
+for label, errors in [("Clean", clean_errors), ("Three outliers", contaminated_errors)]:
+    mae = np.mean(np.abs(errors))
+    rmse = np.sqrt(np.mean(errors ** 2))
+    print(f"{label:<14}: MAE={mae:.2f} | RMSE={rmse:.2f} | RMSE/MAE={rmse/mae:.2f}")
 """
         ),
         nbf.v4.new_markdown_cell(
@@ -355,32 +393,77 @@ print(f"Interpretation: R² is negative whenever the model's predictions have la
         ),
         nbf.v4.new_markdown_cell(
             """---
-## 2.6 Feature Scaling & Bit-for-Bit Tree Invariance 🔴 (7 min)
-> 📖 **Website:** [Feature Scaling](http://localhost:5173/#feature-scaling)
+## 2.6 Feature Engineering: Expose the Interaction 🟠 (6 min)
+> 📖 **Website:** [Feature Engineering](http://localhost:5173/#feature-engineering)
 
-**The question:** Which algorithms strictly require feature scaling, and are tree-based models truly invariant?
+**The question:** If risk depends on two features jointly, can a linear model recover the pattern without being given an interaction?
 
-**What you'll see:** A benchmark table across 5 model families, followed by an exact bit-for-bit `assert np.array_equal(...)` proving tree predictions are identical with or without scaling."""
+**What you'll see:** The churn generator plants a spend×short-tenure interaction. We expose that term explicitly to logistic regression and compare it with a tree model that can learn threshold interactions directly."""
         ),
         nbf.v4.new_code_cell(
-            """from sklearn.preprocessing import StandardScaler
+            """from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.metrics import log_loss
+
+df_fe = make_churn_panel(n_users=20000, snapshots_per_user=1, seed=SEED)
+base_cols = ["tenure_days", "monthly_spend"]
+X_fe = df_fe[base_cols].copy()
+X_fe["spend_x_short_tenure"] = (X_fe["monthly_spend"] / 55.0) * np.exp(-X_fe["tenure_days"] / 130.0)
+y_fe = df_fe["churned"]
+Xf_train, Xf_test, yf_train, yf_test = train_test_split(X_fe, y_fe, test_size=0.3, stratify=y_fe, random_state=SEED)
+
+def logistic_metrics(columns):
+    model = Pipeline([("scale", StandardScaler()), ("model", LogisticRegression(max_iter=1500))])
+    model.fit(Xf_train[columns], yf_train)
+    probs = model.predict_proba(Xf_test[columns])[:, 1]
+    return roc_auc_score(yf_test, probs), average_precision_score(yf_test, probs), log_loss(yf_test, probs)
+
+base_metrics = logistic_metrics(base_cols)
+interaction_metrics = logistic_metrics(base_cols + ["spend_x_short_tenure"])
+tree_fe = HistGradientBoostingClassifier(random_state=SEED).fit(Xf_train[base_cols], yf_train)
+tree_probs = tree_fe.predict_proba(Xf_test[base_cols])[:, 1]
+print(f"Linear, raw features         : ROC-AUC={base_metrics[0]:.3f} | PR-AUC={base_metrics[1]:.3f} | Log Loss={base_metrics[2]:.3f}")
+print(f"Linear, + planted interaction: ROC-AUC={interaction_metrics[0]:.3f} | PR-AUC={interaction_metrics[1]:.3f} | Log Loss={interaction_metrics[2]:.3f}")
+print(f"Incremental PR-AUC from feature engineering: {interaction_metrics[1]-base_metrics[1]:+.3f}")
+print(f"Tree, raw features           : ROC-AUC={roc_auc_score(yf_test, tree_probs):.3f} | PR-AUC={average_precision_score(yf_test, tree_probs):.3f}")
+"""
+        ),
+        nbf.v4.new_markdown_cell(
+            """> 🎤 **In an interview:** "Feature engineering injects useful inductive bias. I derive features using domain knowledge and only information available at prediction time, then validate the incremental value with the transformation inside the pipeline." """
+        ),
+        nbf.v4.new_markdown_cell(
+            """---
+## 2.7 Feature Scaling & Bit-for-Bit Tree Invariance 🔴 (7 min)
+> 📖 **Website:** [Feature Scaling](http://localhost:5173/#feature-scaling)
+
+**The question:** Which algorithms are scale-sensitive, and why are rank-based tree splits usually invariant to standardization?
+
+**What you'll see:** A leakage-free benchmark across five model families, an exact prediction-equality check for a seeded forest on this dataset, and a RobustScaler comparison for an outlier-contaminated feature."""
+        ),
+        nbf.v4.new_code_cell(
+            """from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingClassifier
+from sklearn.base import clone
 
 df_sc = make_churn_panel(n_users=2000, snapshots_per_user=1, seed=SEED)
 X_raw = df_sc[["tenure_days", "monthly_spend", "logins_30d"]].values  # wildly different scales
 y_sc = df_sc["churned"].values
 
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X_raw)
+split = 1500
+scaler = StandardScaler().fit(X_raw[:split])
+X_scaled = scaler.transform(X_raw)
 
 # Tree predictions test
-tree_raw = RandomForestClassifier(random_state=SEED, n_estimators=30).fit(X_raw, y_sc)
-tree_scaled = RandomForestClassifier(random_state=SEED, n_estimators=30).fit(X_scaled, y_sc)
+tree_raw = RandomForestClassifier(random_state=SEED, n_estimators=30).fit(X_raw[:split], y_sc[:split])
+tree_scaled = RandomForestClassifier(random_state=SEED, n_estimators=30).fit(X_scaled[:split], y_sc[:split])
 
-preds_tree_raw = tree_raw.predict(X_raw)
-preds_tree_scaled = tree_scaled.predict(X_scaled)
+preds_tree_raw = tree_raw.predict(X_raw[split:])
+preds_tree_scaled = tree_scaled.predict(X_scaled[split:])
 
 # Bit-for-bit assertion:
 assert np.array_equal(preds_tree_raw, preds_tree_scaled), "Tree predictions must be identical!"
@@ -389,50 +472,71 @@ print("✅ Assertion Passed: np.array_equal(preds_tree_raw, preds_tree_scaled) i
 # Benchmark across families
 models_scale_test = {
     "KNN (k=5)": KNeighborsClassifier(n_neighbors=5),
-    "SVM (RBF kernel)": SVC(probability=True, random_state=SEED),
-    "Logistic Regression": LogisticRegression(random_state=SEED),
+    "SVM (RBF kernel)": SVC(random_state=SEED),
+    "Logistic Regression": LogisticRegression(random_state=SEED, max_iter=2000),
     "Random Forest": RandomForestClassifier(random_state=SEED, n_estimators=30),
     "HistGradientBoosting": HistGradientBoostingClassifier(random_state=SEED),
 }
+scale_guidance = {
+    "KNN (k=5)": "Yes—distance",
+    "SVM (RBF kernel)": "Yes—distance/kernel",
+    "Logistic Regression": "Recommended—regularization/conditioning",
+    "Random Forest": "No—rank-based splits",
+    "HistGradientBoosting": "No—rank-based splits",
+}
+
+def ranking_scores(model, X):
+    return model.predict_proba(X)[:, 1] if hasattr(model, "predict_proba") else model.decision_function(X)
 
 scale_rows = []
 for name, m in models_scale_test.items():
-    m.fit(X_raw[:1500], y_sc[:1500])
-    auc_unscaled = roc_auc_score(y_sc[1500:], m.predict_proba(X_raw[1500:])[:, 1])
-    
-    m.fit(X_scaled[:1500], y_sc[:1500])
-    auc_scaled = roc_auc_score(y_sc[1500:], m.predict_proba(X_scaled[1500:])[:, 1])
+    raw_model = clone(m).fit(X_raw[:split], y_sc[:split])
+    scaled_model = clone(m).fit(X_scaled[:split], y_sc[:split])
+    auc_unscaled = roc_auc_score(y_sc[split:], ranking_scores(raw_model, X_raw[split:]))
+    auc_scaled = roc_auc_score(y_sc[split:], ranking_scores(scaled_model, X_scaled[split:]))
     
     scale_rows.append({
         "Model Family": name,
         "Unscaled ROC-AUC": np.round(auc_unscaled, 3),
         "Scaled ROC-AUC": np.round(auc_scaled, 3),
         "Impact of Scaling": f"{auc_scaled - auc_unscaled:+.3f}",
-        "Requires Scaling?": "YES" if abs(auc_scaled - auc_unscaled) > 0.05 else "NO (Tree Invariant)"
+        "Scaling guidance": scale_guidance[name],
     })
 
-pd.DataFrame(scale_rows).set_index("Model Family")
+display(pd.DataFrame(scale_rows).set_index("Model Family"))
+
+feature_with_outlier = np.r_[np.random.RandomState(SEED).normal(size=500), 25.0].reshape(-1, 1)
+scale_summary = []
+for transformer in [StandardScaler(), MinMaxScaler(), RobustScaler()]:
+    values = transformer.fit_transform(feature_with_outlier).ravel()
+    scale_summary.append((transformer.__class__.__name__, np.percentile(values, 75) - np.percentile(values, 25), values.max()))
+print("\\nEffect of one extreme outlier:")
+print(pd.DataFrame(scale_summary, columns=["Scaler", "Central IQR", "Transformed maximum"]).round(3).to_string(index=False))
 """
         ),
         nbf.v4.new_markdown_cell(
-            """> 🎤 **In an interview:** "Decision trees split on individual feature rank order ($x_j > \\theta$), making them completely invariant to monotonic transformations like scaling. Distance-based (KNN, SVM, K-Means) and gradient-based linear models are dominated by whichever feature has the largest unit scale unless normalized." """
+            """> 🎤 **In an interview:** "Distance and kernel methods need comparable feature scales. Trees use order-based thresholds and are normally invariant to scaling; for regularized linear models, scaling makes the penalty and optimization conditioning comparable across features." """
         ),
         nbf.v4.new_markdown_cell(
             """---
-## 2.7 Handling Missing Data & Missingness Indicators 🟠 (8 min)
+## 2.8 Handling Missing Data & Missingness Indicators 🟠 (8 min)
 > 📖 **Website:** [Handling Missing Data](http://localhost:5173/#missing-data)
 
 **The question:** When data is Missing Not At Random (MNAR), what happens if you impute with the median?
 
-**What you'll see:** Imputing MNAR `income` with the median destroys predictive signal, but adding `SimpleImputer(add_indicator=True)` recovers the performance and assigns a large learned coefficient to the missingness indicator."""
+**What you'll see:** Median imputation cannot distinguish an actually typical value from a missing value. Adding an indicator recovers some of that information; a gradient-boosted tree provides a comparison because it can route missing values natively."""
         ),
         nbf.v4.new_code_cell(
             """from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
+from sklearn.model_selection import train_test_split
 
-df_mnar = make_churn_panel(n_users=3000, snapshots_per_user=1, seed=SEED)
-X_inc = df_mnar[["income", "tenure_days", "monthly_spend"]]
+df_mnar = make_churn_panel(n_users=10000, snapshots_per_user=1, seed=SEED)
+X_inc = df_mnar[["income"]]
 y_mnar = df_mnar["churned"]
+X_train_m, X_test_m, y_train_m, y_test_m = train_test_split(
+    X_inc, y_mnar, test_size=0.3, stratify=y_mnar, random_state=SEED
+)
 
 # 1. Plain Median Imputation
 pipe_plain = Pipeline([
@@ -440,8 +544,8 @@ pipe_plain = Pipeline([
     ("scaler", StandardScaler()),
     ("clf", LogisticRegression(random_state=SEED)),
 ])
-pipe_plain.fit(X_inc[:2000], y_mnar[:2000])
-auc_plain = roc_auc_score(y_mnar[2000:], pipe_plain.predict_proba(X_inc[2000:])[:, 1])
+pipe_plain.fit(X_train_m, y_train_m)
+auc_plain = roc_auc_score(y_test_m, pipe_plain.predict_proba(X_test_m)[:, 1])
 
 # 2. Median Imputation WITH Missing Indicator
 pipe_ind = Pipeline([
@@ -449,23 +553,29 @@ pipe_ind = Pipeline([
     ("scaler", StandardScaler()),
     ("clf", LogisticRegression(random_state=SEED)),
 ])
-pipe_ind.fit(X_inc[:2000], y_mnar[:2000])
-auc_ind = roc_auc_score(y_mnar[2000:], pipe_ind.predict_proba(X_inc[2000:])[:, 1])
+pipe_ind.fit(X_train_m, y_train_m)
+auc_ind = roc_auc_score(y_test_m, pipe_ind.predict_proba(X_test_m)[:, 1])
 
 coef_ind = pipe_ind.named_steps["clf"].coef_[0][-1]
 
 print(f"Plain Median Imputation ROC-AUC       : {auc_plain:.3f}")
 print(f"Median Imputer + Indicator ROC-AUC   : {auc_ind:.3f}   <-- ({auc_ind - auc_plain:+.3f} recovery)")
 print(f"Learned Weight on Missing Indicator   : {coef_ind:.3f}")
-print(f"\\nThe size of the indicator coefficient proves that missingness itself WAS predictive signal.")
+
+X_native = df_mnar[["income", "tenure_days", "monthly_spend"]]
+Xn_tr, Xn_te, yn_tr, yn_te = train_test_split(X_native, y_mnar, test_size=0.3, stratify=y_mnar, random_state=SEED)
+native_gbm = HistGradientBoostingClassifier(random_state=SEED).fit(Xn_tr, yn_tr)
+auc_native = roc_auc_score(yn_te, native_gbm.predict_proba(Xn_te)[:, 1])
+print(f"Native-NaN HistGradientBoosting AUC   : {auc_native:.3f} (no imputer)")
+print("The nonzero indicator coefficient shows that the missingness pattern contains target information in this planted dataset.")
 """
         ),
         nbf.v4.new_markdown_cell(
-            """> 🎤 **In an interview:** "If data is Missing Completely at Random (MCAR), mean/median imputation preserves the conditional distribution. But if data is MNAR—such as high-net-worth users omitting income—imputing a central value erases information. Always pair imputation with missingness indicators." """
+            """> 🎤 **In an interview:** "I diagnose MCAR, MAR, and MNAR from the data-generating process, not just a missingness percentage. Simple imputation changes variance even under MCAR; indicators or native missing-value handling can retain informative missingness, and the whole step stays inside cross-validation." """
         ),
         nbf.v4.new_markdown_cell(
             """---
-## 2.8 Categorical Variables & High-Cardinality Encoding 🔴 (8 min)
+## 2.9 Categorical Variables & High-Cardinality Encoding 🔴 (8 min)
 > 📖 **Website:** [Categorical Variables](http://localhost:5173/#categorical)
 
 **The question:** For high-cardinality features (~200 categories like `plan_region`), should you use One-Hot Encoding, Frequency Encoding, or Out-of-Fold Target Encoding?
@@ -473,90 +583,127 @@ print(f"\\nThe size of the indicator coefficient proves that missingness itself 
 **What you'll see:** A benchmark comparing feature dimensions, training latency, and test AUC across encoding techniques."""
         ),
         nbf.v4.new_code_cell(
-            """from sklearn.preprocessing import OneHotEncoder, TargetEncoder
+            """from sklearn.preprocessing import OneHotEncoder
+from mlprep.preprocessing import make_target_encoder
+import time
 
-df_cat = make_churn_panel(n_users=3000, snapshots_per_user=1, seed=SEED)
-X_cat = df_cat[["plan_region", "device", "tenure_days", "monthly_spend"]]
-y_cat = df_cat["churned"]
+df_cat = make_churn_panel(n_users=6000, snapshots_per_user=1, seed=SEED)
+cat_cols = ["plan_region", "device"]
+train_cat, test_cat = df_cat.iloc[:4500], df_cat.iloc[4500:]
+y_cat_train, y_cat_test = train_cat["churned"], test_cat["churned"]
+encoding_rows = []
 
-# 1. One-Hot Encoding
+def fit_score_encoding(name, X_train_enc, X_test_enc, elapsed):
+    model = HistGradientBoostingClassifier(max_iter=50, random_state=SEED).fit(X_train_enc, y_cat_train)
+    auc = roc_auc_score(y_cat_test, model.predict_proba(X_test_enc)[:, 1])
+    encoding_rows.append((name, X_train_enc.shape[1], elapsed, auc))
+
+# One-hot: no ordering assumption, but many columns
+t0 = time.perf_counter()
 ohe = OneHotEncoder(sparse_output=False, handle_unknown="ignore")
-X_ohe = ohe.fit_transform(X_cat[["plan_region", "device"]])
-clf_ohe = HistGradientBoostingClassifier(random_state=SEED).fit(X_ohe[:2000], y_cat[:2000])
-auc_ohe = roc_auc_score(y_cat[2000:], clf_ohe.predict_proba(X_ohe[2000:])[:, 1])
+X_ohe_train = ohe.fit_transform(train_cat[cat_cols])
+X_ohe_test = ohe.transform(test_cat[cat_cols])
+fit_score_encoding("One-hot", X_ohe_train, X_ohe_test, time.perf_counter() - t0)
 
-# 2. Out-of-fold Target Encoding
-te = TargetEncoder(cv=5, random_state=SEED)
-X_te = te.fit_transform(X_cat[["plan_region", "device"]], y_cat)
-clf_te = HistGradientBoostingClassifier(random_state=SEED).fit(X_te[:2000], y_cat[:2000])
-auc_te = roc_auc_score(y_cat[2000:], clf_te.predict_proba(X_te[2000:])[:, 1])
+# Frequency encoding: compact and target-free, but loses category identity
+t0 = time.perf_counter()
+freq_maps = {c: train_cat[c].value_counts(normalize=True) for c in cat_cols}
+X_freq_train = np.column_stack([train_cat[c].map(freq_maps[c]).fillna(0) for c in cat_cols])
+X_freq_test = np.column_stack([test_cat[c].map(freq_maps[c]).fillna(0) for c in cat_cols])
+fit_score_encoding("Frequency", X_freq_train, X_freq_test, time.perf_counter() - t0)
 
-print(f"One-Hot Encoding        : Dimensions = {X_ohe.shape[1]:<4} | ROC-AUC = {auc_ohe:.3f}")
-print(f"Out-of-Fold Target Enc  : Dimensions = {X_te.shape[1]:<4} | ROC-AUC = {auc_te:.3f}")
-print(f"\\nTarget encoding compressed 200+ sparse dummy columns down to 2 dense numerical features with zero dimensionality explosion.")
+# Target encoding: OOF values for training, train-only mapping for test
+t0 = time.perf_counter()
+te = make_target_encoder(SEED)
+X_te_train = te.fit_transform(train_cat[cat_cols], y_cat_train)
+X_te_test = te.transform(test_cat[cat_cols])
+fit_score_encoding("Out-of-fold target", X_te_train, X_te_test, time.perf_counter() - t0)
+
+encoding_df = pd.DataFrame(encoding_rows, columns=["Encoding", "Dimensions", "Encode seconds", "Test ROC-AUC"])
+print(encoding_df.round(3).to_string(index=False))
+
+unseen = pd.DataFrame({"plan_region": ["REG_999"], "device": ["Console"]})
+assert ohe.transform(unseen).shape[1] == X_ohe_train.shape[1]
+print("\\nUnseen categories transformed safely because OneHotEncoder(handle_unknown='ignore') keeps a stable schema.")
+print("Target encoding is compact, not automatically more accurate; choose it with nested, leakage-free validation.")
 """
         ),
         nbf.v4.new_markdown_cell(
-            """> 🎤 **In an interview:** "For low-cardinality categories (<15 levels), one-hot encoding is safe. For high-cardinality features (>100 levels like ZIP codes or merchant IDs), one-hot causes memory explosion and sparse tree splits. I use out-of-fold target encoding with Bayesian smoothing to prevent target leakage." """
+            """> 🎤 **In an interview:** "I default to one-hot for low cardinality. For high cardinality I compare hashing, frequency, native categorical handling, and smoothed out-of-fold target encoding—always fitting the encoder inside each validation fold and defining unknown-category behavior." """
         ),
         nbf.v4.new_markdown_cell(
             """---
-## 2.9 Class Imbalance Strategy Benchmark 🔴 (10 min)
+## 2.10 Class Imbalance Strategy Benchmark 🔴 (10 min)
 > 📖 **Website:** [Class Imbalance](http://localhost:5173/#class-imbalance)
 
 **The question:** What is the empirical performance hierarchy among class imbalance interventions?
 
-**What you'll see:** A clean comparison table proving that **cost-sensitive threshold tuning** and **class weighting** yield peak PR-AUC for zero retraining overhead."""
+**What you'll see:** A train/validation/test comparison of default and cost-tuned thresholds, class weighting, and optional in-fold resampling. The table separates threshold-free ranking metrics from threshold-dependent precision, recall, queue purity, cost, and calibration."""
         ),
         nbf.v4.new_code_cell(
             """import time
+from sklearn.metrics import precision_score, recall_score
 
-df_imb = make_churn_panel(n_users=3500, snapshots_per_user=1, seed=SEED)
+df_imb = make_churn_panel(n_users=6000, snapshots_per_user=1, seed=SEED)
 X_imb = df_imb[["tenure_days", "monthly_spend", "logins_30d"]]
 y_imb = df_imb["churned"]
+X_tr_i, X_tmp_i, y_tr_i, y_tmp_i = train_test_split(X_imb, y_imb, test_size=0.4, stratify=y_imb, random_state=SEED)
+X_val_i, X_te_i, y_val_i, y_te_i = train_test_split(X_tmp_i, y_tmp_i, test_size=0.5, stratify=y_tmp_i, random_state=SEED)
+COST_FP, COST_FN = 8.0, 400.0
 
-X_tr_i, X_te_i = X_imb[:2500], X_imb[2500:]
-y_tr_i, y_te_i = y_imb[:2500], y_imb[2500:]
+def cost_threshold(y, scores):
+    candidates = np.unique(np.r_[0.0, scores, 1.0])
+    costs = []
+    for threshold in candidates:
+        pred = scores >= threshold
+        tn, fp, fn, tp = confusion_matrix(y, pred).ravel()
+        costs.append(fp * COST_FP + fn * COST_FN)
+    return float(candidates[np.argmin(costs)])
 
-# 1. Baseline Model
-t0 = time.time()
-m_base = HistGradientBoostingClassifier(random_state=SEED).fit(X_tr_i, y_tr_i)
-t_base = time.time() - t0
-p_base = m_base.predict_proba(X_te_i)[:, 1]
+def result_row(name, probs, threshold, fit_seconds):
+    pred = probs >= threshold
+    tn, fp, fn, tp = confusion_matrix(y_te_i, pred).ravel()
+    k = min(100, len(probs))
+    top_k = np.argsort(probs)[-k:]
+    return (name, average_precision_score(y_te_i, probs), precision_score(y_te_i, pred, zero_division=0),
+            recall_score(y_te_i, pred), y_te_i.iloc[top_k].mean(), fp * COST_FP + fn * COST_FN,
+            brier_score_loss(y_te_i, probs), fit_seconds, threshold)
 
-# 2. Class-Weighted Model
-t0 = time.time()
-weight_ratio = (len(y_tr_i) - sum(y_tr_i)) / sum(y_tr_i)
-weights = np.where(y_tr_i == 1, weight_ratio, 1.0)
-m_weighted = HistGradientBoostingClassifier(random_state=SEED).fit(X_tr_i, y_tr_i, sample_weight=weights)
-t_weight = time.time() - t0
-p_weight = m_weighted.predict_proba(X_te_i)[:, 1]
+rows = []
+t0 = time.perf_counter()
+m_base = HistGradientBoostingClassifier(max_iter=60, random_state=SEED).fit(X_tr_i, y_tr_i)
+t_base = time.perf_counter() - t0
+p_val_base, p_te_base = m_base.predict_proba(X_val_i)[:, 1], m_base.predict_proba(X_te_i)[:, 1]
+rows.append(result_row("Baseline @ 0.50", p_te_base, 0.5, t_base))
+rows.append(result_row("Baseline + validation cost threshold", p_te_base, cost_threshold(y_val_i, p_val_base), 0.0))
 
-imbalance_results = [
-    {
-        "Strategy": "1. Baseline (threshold @ 0.5)",
-        "PR-AUC": average_precision_score(y_te_i, p_base),
-        "ROC-AUC": roc_auc_score(y_te_i, p_base),
-        "Fit Time (s)": np.round(t_base, 3),
-        "Notes": "Default uncalibrated threshold"
-    },
-    {
-        "Strategy": "2. + Cost-Tuned Threshold",
-        "PR-AUC": average_precision_score(y_te_i, p_base),
-        "ROC-AUC": roc_auc_score(y_te_i, p_base),
-        "Fit Time (s)": 0.000,
-        "Notes": "Zero retraining overhead, maximizes dollar payoff"
-    },
-    {
-        "Strategy": "3. + Sample Weights (class_weight)",
-        "PR-AUC": average_precision_score(y_te_i, p_weight),
-        "ROC-AUC": roc_auc_score(y_te_i, p_weight),
-        "Fit Time (s)": np.round(t_weight, 3),
-        "Notes": "Penalizes minority misclassification loss"
-    },
-]
+t0 = time.perf_counter()
+ratio = (len(y_tr_i) - y_tr_i.sum()) / y_tr_i.sum()
+weights = np.where(y_tr_i == 1, ratio, 1.0)
+m_weight = HistGradientBoostingClassifier(max_iter=60, random_state=SEED).fit(X_tr_i, y_tr_i, sample_weight=weights)
+t_weight = time.perf_counter() - t0
+p_val_weight, p_te_weight = m_weight.predict_proba(X_val_i)[:, 1], m_weight.predict_proba(X_te_i)[:, 1]
+rows.append(result_row("Class-weighted + tuned threshold", p_te_weight, cost_threshold(y_val_i, p_val_weight), t_weight))
 
-pd.DataFrame(imbalance_results).set_index("Strategy")
+try:
+    from imblearn.over_sampling import SMOTE
+    from imblearn.under_sampling import RandomUnderSampler
+    from imblearn.pipeline import Pipeline as ImbPipeline
+    for label, sampler in [("SMOTE in-fold", SMOTE(random_state=SEED)), ("Random undersampling in-fold", RandomUnderSampler(random_state=SEED))]:
+        t0 = time.perf_counter()
+        model = ImbPipeline([("sample", sampler), ("model", HistGradientBoostingClassifier(max_iter=60, random_state=SEED))])
+        model.fit(X_tr_i, y_tr_i)
+        elapsed = time.perf_counter() - t0
+        p_val, p_test = model.predict_proba(X_val_i)[:, 1], model.predict_proba(X_te_i)[:, 1]
+        rows.append(result_row(label + " + tuned threshold", p_test, cost_threshold(y_val_i, p_val), elapsed))
+except ImportError:
+    print("imbalanced-learn not installed; skipping the two optional resampling rows.")
+
+imbalance_df = pd.DataFrame(rows, columns=[
+    "Strategy", "PR-AUC", "Precision", "Recall", "Precision@100", "Test cost ($)", "Brier", "Fit seconds", "Threshold"
+]).set_index("Strategy")
+display(imbalance_df.round(3))
+print("Threshold tuning changes decisions and cost, not PR-AUC or ROC-AUC. Resampling can distort probability calibration; compare Brier scores.")
 """
         ),
         nbf.v4.new_markdown_cell(
@@ -565,6 +712,10 @@ pd.DataFrame(imbalance_results).set_index("Strategy")
     ]
 
     nb["cells"] = cells
+    nb["metadata"] = {
+        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+        "language_info": {"name": "python", "pygments_lexer": "ipython3"},
+    }
     return nb
 
 

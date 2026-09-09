@@ -49,6 +49,7 @@ The website is a fast Vite single-page application. While working through these 
         nbf.v4.new_code_cell(
             """import sys
 import importlib
+from packaging.version import Version
 
 CORE_REQUIREMENTS = {
     "numpy": "1.26.0",
@@ -65,13 +66,17 @@ for pkg, min_ver in CORE_REQUIREMENTS.items():
     try:
         mod = importlib.import_module(pkg)
         ver = getattr(mod, "__version__", "unknown")
-        print(f"✅ {pkg:<12} {ver:<10} (minimum: {min_ver})")
+        if Version(ver) < Version(min_ver):
+            print(f"❌ {pkg:<12} {ver:<10} is too old; run: pip install '{pkg}>={min_ver}'")
+            all_passed = False
+        else:
+            print(f"✅ {pkg:<12} {ver:<10} (minimum: {min_ver})")
     except ImportError:
         print(f"❌ {pkg:<12} NOT INSTALLED (required: pip install {pkg}>={min_ver})")
         all_passed = False
 
-if all_passed:
-    print("\\nAll core dependencies are satisfied and ready for execution.")
+assert all_passed, "Install or upgrade the failed core dependencies, then restart the kernel."
+print("\\nAll core dependencies are satisfied and ready for execution.")
 """
         ),
         nbf.v4.new_markdown_cell(
@@ -98,7 +103,7 @@ for pkg in OPTIONAL_PACKAGES:
 """
         ),
         nbf.v4.new_markdown_cell(
-            """> 🎤 **In an interview:** "For production pipelines, we use clean interfaces with fallback capabilities—for instance, falling back from LightGBM to HistGradientBoosting if native C++ bindings are restricted in an execution container." """
+            """> 🎤 **In an interview:** "I separate required dependencies from optional accelerators. The core pipeline must remain reproducible even when a native boosting library is unavailable." """
         ),
         nbf.v4.new_markdown_cell(
             """### 0.3 Synthetic Churn Panel Tour 🔴
@@ -110,6 +115,7 @@ for pkg in OPTIONAL_PACKAGES:
         ),
         nbf.v4.new_code_cell(
             """from mlprep.data import make_churn_panel
+import matplotlib.pyplot as plt
 
 # Generate the recurring churn panel (4,000 users across 3 monthly snapshots = 12,000 rows)
 df_churn = make_churn_panel(n_users=4000, snapshots_per_user=3, seed=7)
@@ -119,6 +125,16 @@ print(f"Unique Users  : {df_churn['user_id'].nunique():,}")
 print(f"Snapshots     : {df_churn['snapshot_date'].dt.strftime('%Y-%m-%d').unique().tolist()}")
 print(f"Churn Rate    : {df_churn['churned'].mean():.2%} (severe class imbalance)")
 print(f"Missing Income: {df_churn['income'].isna().mean():.2%} (MNAR missingness)")
+print("\\nColumn dtypes:")
+print(df_churn.dtypes.to_string())
+
+missing_pct = (100 * df_churn.isna().mean()).sort_values(ascending=False)
+missing_pct = missing_pct[missing_pct > 0]
+missing_pct.plot.bar(color="#818cf8", title="Missing values by column")
+plt.ylabel("Missing rows (%)")
+plt.xticks(rotation=25, ha="right")
+plt.tight_layout()
+plt.show()
 
 display_cols = ["user_id", "snapshot_date", "tenure_days", "monthly_spend", "logins_30d", "income", "plan_region", "device", "support_tickets_30d", "cancellation_reason_code", "churned"]
 df_churn[display_cols].head(6)
@@ -132,7 +148,7 @@ df_churn[display_cols].head(6)
 | `user_id` | Repeated records per user across monthly snapshots $\\rightarrow$ Demonstrates **group leakage** and the necessity of `GroupKFold`. |
 | `snapshot_date` | Monotone chronological timestamp $\\rightarrow$ Demonstrates **temporal leakage** and forward-chaining validation (`TimeSeriesSplit`). |
 | `tenure_days`, `monthly_spend`, `logins_30d` | Wildly disparate scales ($10\\text{--}2000$, $\\$15\\text{--}350$, $0\\text{--}100$) $\\rightarrow$ Demonstrates **feature scaling** necessity for distance/linear models and invariance in trees. |
-| `income` | Missing Not At Random (**MNAR**) missingness (missing at $>50\\%$ rate for high earners) $\\rightarrow$ Demonstrates **missing indicator** features. |
+| `income` | Missing Not At Random (**MNAR**) missingness (missing at $>50\\%$ rate for high earners) $\\rightarrow$ Demonstrates when a **missing indicator** can retain information. |
 | `plan_region` | High cardinality ($\sim 200$ levels) $\\rightarrow$ Demonstrates **one-hot explosion vs out-of-fold target encoding**. |
 | `device` | 4 unordered categories (`iOS`, `Android`, `Web`, `Desktop`) $\\rightarrow$ Demonstrates the **ordinal encoding false-order trap**. |
 | `support_tickets_30d` | Features collected over a window straddling the churn label $\\rightarrow$ Demonstrates **temporal leakage**. |
@@ -155,6 +171,10 @@ Ready to begin? Move to **[`01_core_concepts.ipynb`](01_core_concepts.ipynb)**!"
     ]
 
     nb["cells"] = cells
+    nb["metadata"] = {
+        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+        "language_info": {"name": "python", "pygments_lexer": "ipython3"},
+    }
     return nb
 
 

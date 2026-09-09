@@ -56,6 +56,10 @@ def check_1_3(audit_fn: Callable):
         if "cancellation_reason_code" not in report.index and "cancellation_reason_code" not in report.get("feature", []):
             print("❌ Feature 'cancellation_reason_code' must be in the audit report.")
             return
+        if "cancellation_reason_code" in report.index and "suspicious_leakage" in report.columns:
+            if not bool(report.loc["cancellation_reason_code", "suspicious_leakage"]):
+                print("❌ 'cancellation_reason_code' should be flagged as suspicious leakage.")
+                return
         print("✅ Correct! Leakage audit successfully created and flagged target/temporal risks.")
     except Exception as e:
         print(f"❌ Error while running audit_leakage: {e}")

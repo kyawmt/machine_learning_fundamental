@@ -18,7 +18,7 @@ In this notebook, we turn the foundational theoretical claims from Hour 1 into *
 1. Prove why thresholding a regressor is fundamentally distinct from classification.
 2. Measure the exact numerical deception of random splits vs group/temporal splits.
 3. Cause 6 forms of data leakage on purpose, measure the inflated numbers, and build an automated leakage auditor.
-4. Reproduce the website's Overfitting Lab (degree 5 minimum) and compute learning curves.
+4. Reproduce the website's Overfitting Lab, select complexity from validation data, and compute learning curves.
 5. Empirically decompose expected error into $\\text{bias}^2 + \\text{variance} + \\text{noise}$ across 200 bootstrap fits.
 6. Quantify the multiple comparisons optimism gap in cross-validation."""
         ),
@@ -47,34 +47,47 @@ print(f"Environment initialized · Seed: {SEED}")
 
 **The question:** If you have continuous target values (e.g. `monthly_spend`), should you predict spend with regression and threshold the predictions (e.g. $>\\$100$), or train a binary classifier directly on `is_high_spender`?
 
-**What you'll see:** A direct comparison showing that regression optimizes MSE (conditional mean), whereas classification optimizes Log Loss (conditional probability). Thresholding a regressor yields suboptimal class boundaries and uncalibrated probabilities."""
+**What you'll see:** A held-out comparison showing that regression estimates a conditional mean, while classification estimates a conditional probability. A regressor's output can rank classes, but it is not a probability and answers a different question."""
         ),
         nbf.v4.new_code_cell(
             """from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.metrics import mean_squared_error, roc_auc_score, log_loss
+from sklearn.metrics import mean_squared_error, roc_auc_score, log_loss, f1_score
+from sklearn.model_selection import train_test_split
 
 df = make_churn_panel(n_users=2000, snapshots_per_user=1, seed=SEED)
 X = df[["tenure_days", "logins_30d"]]
 y_cont = df["monthly_spend"]
 y_bin = (y_cont > 100).astype(int)
 
-# Fit Regressor vs Classifier
-reg = LinearRegression().fit(X, y_cont)
-clf = LogisticRegression(random_state=SEED).fit(X, y_bin)
+# Use one identical held-out split for both framings
+X_train, X_test, y_cont_train, y_cont_test, y_bin_train, y_bin_test = train_test_split(
+    X, y_cont, y_bin, test_size=0.3, stratify=y_bin, random_state=SEED
+)
+reg = LinearRegression().fit(X_train, y_cont_train)
+clf = LogisticRegression(random_state=SEED).fit(X_train, y_bin_train)
 
 # Evaluate
-reg_preds = reg.predict(X)
-reg_as_prob = np.clip((reg_preds - reg_preds.min()) / (reg_preds.max() - reg_preds.min()), 1e-6, 1 - 1e-6)
-clf_probs = clf.predict_proba(X)[:, 1]
+reg_preds = reg.predict(X_test)
+clf_probs = clf.predict_proba(X_test)[:, 1]
 
-auc_reg = roc_auc_score(y_bin, reg_preds)
-auc_clf = roc_auc_score(y_bin, clf_probs)
-ll_reg = log_loss(y_bin, reg_as_prob)
-ll_clf = log_loss(y_bin, clf_probs)
+auc_reg = roc_auc_score(y_bin_test, reg_preds)
+auc_clf = roc_auc_score(y_bin_test, clf_probs)
+rmse_reg = np.sqrt(mean_squared_error(y_cont_test, reg_preds))
+ll_clf = log_loss(y_bin_test, clf_probs)
+f1_reg = f1_score(y_bin_test, reg_preds > 100)
+f1_clf = f1_score(y_bin_test, clf_probs >= 0.5)
 
-print(f"Regression -> Thresholding : ROC-AUC = {auc_reg:.3f} | Log Loss = {ll_reg:.3f}")
-print(f"Direct Binary Classifier   : ROC-AUC = {auc_clf:.3f} | Log Loss = {ll_clf:.3f}")
-print(f"\\nLoss difference: Direct classification log loss is {ll_reg - ll_clf:+.3f} lower because it optimizes the Bernoulli likelihood directly.")
+print(f"Regression target (spend)  : RMSE = ${rmse_reg:.2f}")
+print(f"Regressor used for >$100   : ROC-AUC = {auc_reg:.3f} | F1 = {f1_reg:.3f}")
+print(f"Direct binary classifier   : ROC-AUC = {auc_clf:.3f} | F1 = {f1_clf:.3f} | Log Loss = {ll_clf:.3f}")
+print("\\nDo not compare RMSE with log loss: choose the target and metric from the decision the model must support.")
+
+pd.DataFrame([
+    ("monthly_spend", "regression", "MAE/RMSE"),
+    ("is_high_spender", "binary classification", "PR-AUC + log loss"),
+    ("plan_type", "multiclass classification", "macro-F1 / log loss"),
+    ("days_until_churn", "survival analysis", "concordance + calibration"),
+], columns=["Target", "Problem type", "First metric to consider"])
 """
         ),
         nbf.v4.new_markdown_cell(
@@ -87,7 +100,7 @@ print(f"\\nLoss difference: Direct classification log loss is {ll_reg - ll_clf:+
 
 **The question:** When evaluating the same churn dataset, what happens if we use Random Split vs Stratified Split vs Group Split vs Temporal Split?
 
-**What you'll see:** Random and stratified splits inflate the score to $\\approx 0.93$ because snapshots of the same user leak between train and test. Group split drops to $\\approx 0.84$ (honest score for new users), and Temporal split drops to $\\approx 0.79$ (honest score for future predictions)."""
+**What you'll see:** Random and stratified row splits allow the same customer into train and test. Group and chronological splits answer different deployment questions, so the score you report must match whether you predict for unseen users, future periods, or both."""
         ),
         nbf.v4.new_code_cell(
             """from sklearn.ensemble import HistGradientBoostingClassifier
@@ -100,19 +113,19 @@ y = df_panel["churned"]
 groups = df_panel["user_id"]
 
 # 1. Random Split
-train_idx, test_idx = next(KFold(n_splits=5, shuffle=True, random_state=SEED).split(X, y))
-clf_rand = HistGradientBoostingClassifier(random_state=SEED).fit(X.iloc[train_idx], y.iloc[train_idx])
-auc_rand = roc_auc_score(y.iloc[test_idx], clf_rand.predict_proba(X.iloc[test_idx])[:, 1])
+random_train_idx, random_test_idx = next(KFold(n_splits=5, shuffle=True, random_state=SEED).split(X, y))
+clf_rand = HistGradientBoostingClassifier(random_state=SEED).fit(X.iloc[random_train_idx], y.iloc[random_train_idx])
+auc_rand = roc_auc_score(y.iloc[random_test_idx], clf_rand.predict_proba(X.iloc[random_test_idx])[:, 1])
 
 # 2. Stratified Split
-train_idx, test_idx = next(StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED).split(X, y))
-clf_strat = HistGradientBoostingClassifier(random_state=SEED).fit(X.iloc[train_idx], y.iloc[train_idx])
-auc_strat = roc_auc_score(y.iloc[test_idx], clf_strat.predict_proba(X.iloc[test_idx])[:, 1])
+strat_train_idx, strat_test_idx = next(StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED).split(X, y))
+clf_strat = HistGradientBoostingClassifier(random_state=SEED).fit(X.iloc[strat_train_idx], y.iloc[strat_train_idx])
+auc_strat = roc_auc_score(y.iloc[strat_test_idx], clf_strat.predict_proba(X.iloc[strat_test_idx])[:, 1])
 
 # 3. Group Split (isolate users)
-train_idx, test_idx = next(GroupKFold(n_splits=5).split(X, y, groups=groups))
-clf_group = HistGradientBoostingClassifier(random_state=SEED).fit(X.iloc[train_idx], y.iloc[train_idx])
-auc_group = roc_auc_score(y.iloc[test_idx], clf_group.predict_proba(X.iloc[test_idx])[:, 1])
+group_train_idx, group_test_idx = next(GroupKFold(n_splits=5).split(X, y, groups=groups))
+clf_group = HistGradientBoostingClassifier(random_state=SEED).fit(X.iloc[group_train_idx], y.iloc[group_train_idx])
+auc_group = roc_auc_score(y.iloc[group_test_idx], clf_group.predict_proba(X.iloc[group_test_idx])[:, 1])
 
 # 4. Temporal Split (Train on snapshots 1 & 2, test on snapshot 3)
 tr_mask = df_panel["snapshot_date"] < "2025-03-01"
@@ -120,24 +133,33 @@ te_mask = df_panel["snapshot_date"] == "2025-03-01"
 clf_time = HistGradientBoostingClassifier(random_state=SEED).fit(X[tr_mask], y[tr_mask])
 auc_time = roc_auc_score(y[te_mask], clf_time.predict_proba(X[te_mask])[:, 1])
 
-print(f"random split          ROC-AUC {auc_rand:.3f}   <- fiction (snapshots of same user leak)")
-print(f"stratified split      ROC-AUC {auc_strat:.3f}   <- still fiction (preserves class % but ignores user entity)")
-print(f"group split (user)    ROC-AUC {auc_group:.3f}   <- honest about new unseen users")
-print(f"time split (future)   ROC-AUC {auc_time:.3f}   <- honest about predicting the future")
+split_results = pd.DataFrame([
+    ("random row split", auc_rand, "same users cross the boundary"),
+    ("stratified row split", auc_strat, "class ratio preserved; users still leak"),
+    ("group split (user)", auc_group, "performance on unseen users"),
+    ("time split (future)", auc_time, "performance in a future period"),
+], columns=["Split", "ROC-AUC", "What it estimates"])
+print(split_results.to_string(index=False, formatters={"ROC-AUC": "{:.3f}".format}))
+print("\\nThere is no universally 'honest' splitter: report the split that reproduces the production boundary.")
 """
         ),
         nbf.v4.new_markdown_cell(
             """Let's verify the **mechanism** of group leakage: how many `user_id`s appeared in *both* train and test sets under the random split?"""
         ),
         nbf.v4.new_code_cell(
-            """# Count overlapping users in random split
-train_users = set(df_panel.iloc[train_idx]["user_id"])
-test_users = set(df_panel.iloc[test_idx]["user_id"])
+            """# Count overlapping users in the actual random row split
+train_users = set(df_panel.iloc[random_train_idx]["user_id"])
+test_users = set(df_panel.iloc[random_test_idx]["user_id"])
 overlap = train_users.intersection(test_users)
 
 print(f"Total Test Users in Random Split : {len(test_users):,}")
 print(f"Users Also Present in Train Set : {len(overlap):,} ({len(overlap)/len(test_users):.1%} of test set!)")
-print(f"\\nThe random split test set is not evaluating generalization—it is evaluating user memorization.")
+print("\\nClass-ratio spread across non-stratified vs stratified test folds:")
+kfold_rates = [y.iloc[te].mean() for _, te in KFold(5, shuffle=False).split(X)]
+strat_rates = [y.iloc[te].mean() for _, te in StratifiedKFold(5, shuffle=True, random_state=SEED).split(X, y)]
+print(f"KFold rates          : {[f'{r:.2%}' for r in kfold_rates]} (range {np.ptp(kfold_rates):.2%})")
+print(f"StratifiedKFold rates: {[f'{r:.2%}' for r in strat_rates]} (range {np.ptp(strat_rates):.2%})")
+print("\\nStratification stabilizes class ratios; grouping and chronology prevent different leakage mechanisms.")
 """
         ),
         nbf.v4.new_markdown_cell(
@@ -150,7 +172,7 @@ Write `split_honestly(df, test_frac=0.2)` so that:
             """# ── Exercise 1.2 ────────────────────────────────────────────────
 def split_honestly(df: pd.DataFrame, test_frac: float = 0.2):
     # YOUR CODE HERE:
-    # 1. Select the most recent snapshot date for testing, OR randomly partition user_ids
+    # 1. Hold out users, AND use the latest snapshot as the test period
     # 2. Return train_df, test_df
     pass
 
@@ -163,28 +185,27 @@ def split_honestly(df: pd.DataFrame, test_frac: float = 0.2):
 <summary>💡 Solution</summary>
 
 ```python
-def split_honestly(df: pd.DataFrame, test_frac: float = 0.2):
-    dates = sorted(df["snapshot_date"].unique())
-    n_test_dates = max(1, int(round(len(dates) * test_frac)))
-    split_date = dates[-n_test_dates]
-    
-    # Partition users
-    all_users = sorted(df["user_id"].unique())
-    n_test_users = int(round(len(all_users) * test_frac))
-    test_user_set = set(all_users[-n_test_users:])
-    
+def split_honestly(df: pd.DataFrame, test_frac: float = 0.2, seed: int = 7):
+    if not 0 < test_frac < 1:
+        raise ValueError("test_frac must be between 0 and 1")
+    split_date = df["snapshot_date"].max()
+    users = np.sort(df["user_id"].unique())
+    rng = np.random.RandomState(seed)
+    n_test_users = max(1, int(round(len(users) * test_frac)))
+    test_user_set = set(rng.choice(users, size=n_test_users, replace=False))
+
     train_df = df[(df["snapshot_date"] < split_date) & (~df["user_id"].isin(test_user_set))].copy()
-    test_df = df[(df["snapshot_date"] >= split_date) & (df["user_id"].isin(test_user_set))].copy()
+    test_df = df[(df["snapshot_date"] == split_date) & (df["user_id"].isin(test_user_set))].copy()
     return train_df, test_df
 
 check_1_2(split_honestly)
 ```
 
-**Why this works:** It establishes a strict temporal boundary and purges overlapping user entities, simulating production deployment where models predict future activity of new entities.
+**Why this works:** It establishes a strict temporal boundary and holds out entire users. Rows not needed for this estimand are deliberately purged rather than allowed to cross either boundary.
 </details>"""
         ),
         nbf.v4.new_markdown_cell(
-            """> 🎤 **In an interview:** "I never use standard random K-Fold on panel or time-series data. If observations have entity structure, use GroupKFold; if predicting into the future, use chronological forward-chaining. Reporting random split AUC on panel data is reporting fiction." """
+            """> 🎤 **In an interview:** "My validation boundary mirrors deployment. I use group splits for unseen entities, chronological splits for future periods, and both constraints when production has both forms of novelty." """
         ),
         nbf.v4.new_markdown_cell(
             """---
@@ -242,51 +263,68 @@ print(f"\\nA jump of {auc_leaky - auc_clean:+.3f} from a single post-event colum
             """Let's compare all 6 canonical leakage modes in one comprehensive benchmark table:"""
         ),
         nbf.v4.new_code_cell(
-            """# 2. Scale Before Split
-scaler_leaky = StandardScaler().fit(pd.concat([X_tr_clean, X_te_clean]))
-X_tr_sc_leak = scaler_leaky.transform(X_tr_clean)
-X_te_sc_leak = scaler_leaky.transform(X_te_clean)
-clf_sc = LogisticRegression(random_state=SEED).fit(X_tr_sc_leak, y_tr)
-auc_scale_leak = roc_auc_score(y_te, clf_sc.predict_proba(X_te_sc_leak)[:, 1])
+            """from sklearn.model_selection import StratifiedKFold, cross_val_score
+from mlprep.preprocessing import make_target_encoder
 
-# 3. Temporal Leakage (Post-event tickets)
-X_tr_t_leak = X_tr_clean.copy()
-X_tr_t_leak["tickets"] = train_df["support_tickets_30d"]
-X_te_t_leak = X_te_clean.copy()
-X_te_t_leak["tickets"] = test_df["support_tickets_30d"]
+# Use like-for-like clean references for each model family
+clean_hgb = HistGradientBoostingClassifier(random_state=SEED).fit(X_tr_clean, y_tr)
+auc_clean_hgb = roc_auc_score(y_te, clean_hgb.predict_proba(X_te_clean)[:, 1])
+
+# 2. Scale before split: usually a tiny numerical leak, still the wrong boundary
+scaler_leaky = StandardScaler().fit(pd.concat([X_tr_clean, X_te_clean]))
+clf_sc = LogisticRegression(random_state=SEED).fit(scaler_leaky.transform(X_tr_clean), y_tr)
+auc_scale_leak = roc_auc_score(y_te, clf_sc.predict_proba(scaler_leaky.transform(X_te_clean))[:, 1])
+
+# 3. Temporal leakage: feature window contains post-outcome tickets
+X_tr_t_leak = X_tr_clean.assign(tickets=train_df["support_tickets_30d"])
+X_te_t_leak = X_te_clean.assign(tickets=test_df["support_tickets_30d"])
 clf_temp = HistGradientBoostingClassifier(random_state=SEED).fit(X_tr_t_leak, y_tr)
 auc_temp_leak = roc_auc_score(y_te, clf_temp.predict_proba(X_te_t_leak)[:, 1])
 
-# 4. Duplicate Rows
-X_tr_dup = pd.concat([X_tr_clean, X_te_clean.sample(frac=0.3, random_state=SEED)])
-y_tr_dup = pd.concat([y_tr, y_te.loc[X_tr_dup.index.intersection(y_te.index)]])
+# 4. Exact test rows copied into training
+copied = test_df.sample(frac=0.3, random_state=SEED)
+X_tr_dup = pd.concat([X_tr_clean, copied[X_tr_clean.columns]])
+y_tr_dup = pd.concat([y_tr, copied["churned"]])
 clf_dup = HistGradientBoostingClassifier(random_state=SEED).fit(X_tr_dup, y_tr_dup)
 auc_dup_leak = roc_auc_score(y_te, clf_dup.predict_proba(X_te_clean)[:, 1])
 
-# 5. Naive Target Encoding on high-cardinality region
-region_means = train_df.groupby("plan_region")["churned"].mean()
-X_tr_te = X_tr_clean.copy()
-X_tr_te["region_enc"] = train_df["plan_region"].map(region_means).fillna(y_tr.mean())
-X_te_te = X_te_clean.copy()
-X_te_te["region_enc"] = test_df["plan_region"].map(region_means).fillna(y_tr.mean())
-clf_te = HistGradientBoostingClassifier(random_state=SEED).fit(X_tr_te, y_tr)
-auc_te_leak = roc_auc_score(y_te, clf_te.predict_proba(X_te_te)[:, 1])
+# 5. Naive full-data target encoding vs encoding fitted inside each outer fold
+cat_df = df_panel[df_panel["snapshot_date"] == df_panel["snapshot_date"].min()].copy()
+cat_X, cat_y = cat_df[["plan_region"]], cat_df["churned"]
+cv_cat = StratifiedKFold(5, shuffle=True, random_state=SEED)
+full_means = cat_df.groupby("plan_region")["churned"].mean()
+naive_encoded = cat_X["plan_region"].map(full_means).to_frame("region_target_mean")
+auc_te_leak = cross_val_score(HistGradientBoostingClassifier(random_state=SEED), naive_encoded, cat_y, cv=cv_cat, scoring="roc_auc").mean()
+proper_te = Pipeline([("encode", make_target_encoder(SEED)), ("model", HistGradientBoostingClassifier(random_state=SEED))])
+auc_te_proper = cross_val_score(proper_te, cat_X, cat_y, cv=cv_cat, scoring="roc_auc").mean()
+
+# 6. SMOTE before CV vs SMOTE inside each training fold (optional dependency)
+try:
+    from imblearn.over_sampling import SMOTE
+    from imblearn.pipeline import Pipeline as ImbPipeline
+    smote_X = cat_df[["tenure_days", "monthly_spend", "logins_30d"]]
+    X_res, y_res = SMOTE(random_state=SEED).fit_resample(smote_X, cat_y)
+    auc_smote_leak = cross_val_score(HistGradientBoostingClassifier(random_state=SEED), X_res, y_res, cv=5, scoring="roc_auc").mean()
+    proper_smote = ImbPipeline([("smote", SMOTE(random_state=SEED)), ("model", HistGradientBoostingClassifier(random_state=SEED))])
+    auc_smote_proper = cross_val_score(proper_smote, smote_X, cat_y, cv=cv_cat, scoring="roc_auc").mean()
+except ImportError:
+    auc_smote_leak = auc_smote_proper = np.nan
 
 summary_leakage = pd.DataFrame([
-    {"Leakage Mode": "Baseline (Honest Pipeline)", "Reported AUC": auc_clean, "Honest AUC": auc_clean, "Gap": 0.0, "Root Cause": "Correctly isolated test set"},
-    {"Leakage Mode": "Scale Before Split", "Reported AUC": auc_scale_leak, "Honest AUC": auc_clean, "Gap": auc_scale_leak - auc_clean, "Root Cause": "Global mean/variance used in fit"},
-    {"Leakage Mode": "Target Leakage (Cancel Code)", "Reported AUC": auc_leaky, "Honest AUC": auc_clean, "Gap": auc_leaky - auc_clean, "Root Cause": "Feature populated conditionally on label"},
-    {"Leakage Mode": "Temporal Leakage (Post-Event)", "Reported AUC": auc_temp_leak, "Honest AUC": auc_clean, "Gap": auc_temp_leak - auc_clean, "Root Cause": "Feature window straddles future event"},
-    {"Leakage Mode": "Duplicate Rows Across Split", "Reported AUC": auc_dup_leak, "Honest AUC": auc_clean, "Gap": auc_dup_leak - auc_clean, "Root Cause": "Exact training samples in test fold"},
-    {"Leakage Mode": "Naive In-Sample Target Encoding", "Reported AUC": auc_te_leak, "Honest AUC": auc_clean, "Gap": auc_te_leak - auc_clean, "Root Cause": "Target mean computed without out-of-fold split"},
-])
-
-summary_leakage
+    ("Scale before split", auc_scale_leak, auc_clean, "global transform statistics"),
+    ("Target leakage (cancel code)", auc_leaky, auc_clean, "feature is written after the outcome"),
+    ("Temporal leakage (tickets)", auc_temp_leak, auc_clean_hgb, "feature window crosses prediction time"),
+    ("Duplicate test rows", auc_dup_leak, auc_clean_hgb, "evaluation rows copied into training"),
+    ("Full-data target encoding", auc_te_leak, auc_te_proper, "validation labels used in encoding"),
+    ("SMOTE before CV", auc_smote_leak, auc_smote_proper, "synthetic neighbors cross fold boundaries"),
+], columns=["Leakage mode", "Leaky score", "Leakage-free reference", "Root cause"])
+summary_leakage["Optimism gap"] = summary_leakage["Leaky score"] - summary_leakage["Leakage-free reference"]
+summary_leakage.round(3)
 """
         ),
         nbf.v4.new_markdown_cell(
             """### 📝 Exercise 1.3: Leakage Audit Function
-Implement `audit_leakage(df, target, time_col, group_col)` that returns a summary DataFrame with correlation, missingness by class, and a suspicion flag."""
+Implement `audit_leakage(df, target, time_col, group_col)` that returns a summary DataFrame with correlation, missingness by class, within-class constancy, and a suspicion flag."""
         ),
         nbf.v4.new_code_cell(
             """# ── Exercise 1.3 ────────────────────────────────────────────────
@@ -310,10 +348,12 @@ def audit_leakage(df: pd.DataFrame, target: str, time_col: str, group_col: str) 
     for col in df.columns:
         if col in [target, time_col, group_col]:
             continue
-        # Check missingness by class
+        # Check missingness and within-class constancy
         miss_pos = df[df[target] == 1][col].isna().mean()
         miss_neg = df[df[target] == 0][col].isna().mean()
         miss_gap = abs(miss_pos - miss_neg)
+        unique_by_class = df.groupby(target)[col].nunique(dropna=False)
+        constant_in_a_class = bool((unique_by_class <= 1).any())
         
         # Check correlation if numeric
         corr = 0.0
@@ -322,13 +362,14 @@ def audit_leakage(df: pd.DataFrame, target: str, time_col: str, group_col: str) 
             if len(valid) > 0 and valid[col].std() > 0:
                 corr = abs(np.corrcoef(valid[col], valid[target])[0, 1])
                 
-        is_suspicious = (miss_gap > 0.40) or (corr > 0.85)
+        is_suspicious = (miss_gap > 0.40) or (corr > 0.85) or (constant_in_a_class and miss_gap > 0.20)
         records.append({
             "feature": col,
             "corr_with_target": np.round(corr, 3),
             "missing_pct_pos": np.round(miss_pos, 3),
             "missing_pct_neg": np.round(miss_neg, 3),
             "missing_gap": np.round(miss_gap, 3),
+            "constant_in_a_class": constant_in_a_class,
             "suspicious_leakage": is_suspicious
         })
     return pd.DataFrame(records).set_index("feature")
@@ -349,7 +390,7 @@ check_1_3(audit_leakage)
 
 **The question:** How does training error behave compared to validation error as model capacity increases?
 
-**What you'll see:** We reproduce the website's **Overfitting Lab** with 14 points ($f(x) = \\sin(1.65\\pi x) \\cdot 0.85 + 0.35x$). Training error falls monotonically, while validation error exhibits the exact U-shaped curve with its minimum at **degree 5**."""
+**What you'll see:** We reproduce the website's **Overfitting Lab** with 14 points ($f(x) = \\sin(1.65\\pi x) \\cdot 0.85 + 0.35x$). Training error falls while validation error is U-shaped; the selected degree is computed from validation data instead of asserted in advance."""
         ),
         nbf.v4.new_code_cell(
             """from sklearn.preprocessing import PolynomialFeatures
@@ -397,22 +438,25 @@ plt.show()
 print(f"Degree 1  (Underfitting) : Train RMSE = {train_errors[0]:.3f} | Val RMSE = {val_errors[0]:.3f}")
 print(f"Degree {best_degree}  (Optimal Fit)  : Train RMSE = {train_errors[best_degree-1]:.3f} | Val RMSE = {val_errors[best_degree-1]:.3f}")
 print(f"Degree 12 (Overfitting)  : Train RMSE = {train_errors[-1]:.3f} | Val RMSE = {val_errors[-1]:.3f}")
-print(f"\\nNotice: Training error NEVER increases. You cannot detect overfitting from the training curve alone.")
+print("\\nIn this nested-capacity sweep, training error keeps falling while validation error reverses. The training curve alone does not diagnose overfitting.")
 """
         ),
         nbf.v4.new_markdown_cell(
             """Now let's compute a **Learning Curve** on the churn panel to answer the executive question: *Will collecting more data improve model performance?*"""
         ),
         nbf.v4.new_code_cell(
-            """from sklearn.model_selection import learning_curve
+            """from sklearn.model_selection import learning_curve, GroupKFold
+
+group_cv_splits = list(GroupKFold(n_splits=3).split(X_tr_clean, y_tr, groups=train_df["user_id"]))
 
 train_sizes, train_scores, val_scores = learning_curve(
     HistGradientBoostingClassifier(random_state=SEED, max_iter=50),
     X_tr_clean,
     y_tr,
     train_sizes=np.linspace(0.1, 1.0, 6),
-    cv=3,
+    cv=group_cv_splits,
     scoring="roc_auc",
+    shuffle=True,
     random_state=SEED,
 )
 
@@ -429,8 +473,9 @@ plt.legend()
 plt.show()
 
 val_gain = val_mean[-1] - val_mean[-2]
-print(f"Final sample addition yielded only {val_gain:+.4f} ROC-AUC gain.")
-print(f"Diagnosis: The validation curve has plateaued. Adding raw rows will not help; engineer better features or adjust model family.")
+diagnosis = "still rising; more representative data may help" if val_gain > 0.005 else "approximately flat; prioritize features or model bias"
+print(f"Final sample addition changed validation ROC-AUC by {val_gain:+.4f}.")
+print(f"Diagnosis: the curve is {diagnosis}. Treat 0.005 as a practical heuristic, not a statistical test.")
 """
         ),
         nbf.v4.new_markdown_cell(
@@ -478,7 +523,7 @@ check_1_4(diagnose_fit)
 
 **The question:** The website states $\\text{Expected Error} = \\text{Bias}^2 + \\text{Variance} + \\sigma^2$. Can we measure this decomposition empirically?
 
-**What you'll see:** We will draw 200 bootstrap training datasets, fit models of low (degree 1), optimal (degree 3), and high (degree 10) complexity, compute the empirical predictions across 100 test points, and quantify $\\text{Bias}^2$ and $\\text{Variance}$ directly."""
+**What you'll see:** We will draw 200 bootstrap training datasets, fit models of low (degree 1), balanced (degree 3), and high (degree 10) complexity, compute predictions across 100 test points, and quantify $\\text{Bias}^2$ and $\\text{Variance}$ directly."""
         ),
         nbf.v4.new_code_cell(
             """def true_fn(x):
@@ -575,7 +620,29 @@ print(f"Degree 10 hits the curve on average but spreads wildly (var={results[10]
 **What you'll see:** The **multiple comparisons problem**: as we evaluate more random parameter configurations on a small validation set, the *best observed validation score* rises steadily due to lucky noise, while the true held-out test score stays flat."""
         ),
         nbf.v4.new_code_cell(
-            """# Multiple comparisons divergence simulation
+            """# Same estimator, different validation boundaries
+cv_estimator = HistGradientBoostingClassifier(random_state=SEED, max_iter=50)
+strat_cv = StratifiedKFold(5, shuffle=True, random_state=SEED)
+group_cv = GroupKFold(5)
+strat_scores = cross_val_score(cv_estimator, X, y, cv=strat_cv, scoring="roc_auc")
+group_scores = cross_val_score(cv_estimator, X, y, cv=group_cv, groups=groups, scoring="roc_auc")
+
+forward_scores = []
+dates = sorted(df_panel["snapshot_date"].unique())
+for cutoff in dates[1:]:
+    tr = df_panel["snapshot_date"] < cutoff
+    va = df_panel["snapshot_date"] == cutoff
+    fitted = HistGradientBoostingClassifier(random_state=SEED, max_iter=50).fit(X[tr], y[tr])
+    forward_scores.append(roc_auc_score(y[va], fitted.predict_proba(X[va])[:, 1]))
+
+cv_summary = pd.DataFrame([
+    ("StratifiedKFold (row-wise)", np.mean(strat_scores), np.std(strat_scores), "repeated users may cross folds"),
+    ("GroupKFold (user)", np.mean(group_scores), np.std(group_scores), "unseen-user generalization"),
+    ("Forward chronological", np.mean(forward_scores), np.std(forward_scores), "future-period generalization"),
+], columns=["Validation scheme", "Mean ROC-AUC", "Std", "Interpretation"])
+print(cv_summary.to_string(index=False, formatters={"Mean ROC-AUC": "{:.3f}".format, "Std": "{:.3f}".format}))
+
+# Multiple comparisons divergence simulation
 rng = np.random.RandomState(SEED)
 N_TRIALS = 400
 
@@ -620,6 +687,10 @@ print(f"\\nThis divergence is why tuning requires Nested CV or an unbreached hel
     ]
 
     nb["cells"] = cells
+    nb["metadata"] = {
+        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+        "language_info": {"name": "python", "pygments_lexer": "ipython3"},
+    }
     return nb
 
 

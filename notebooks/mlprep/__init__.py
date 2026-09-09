@@ -7,4 +7,6 @@ and automated exercise assertions.
 
 SITE = "http://localhost:5173/"
 
-__all__ = ["SITE"]
+from mlprep.preprocessing import make_target_encoder
+
+__all__ = ["SITE", "make_target_encoder"]
